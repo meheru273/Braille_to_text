@@ -53,8 +53,8 @@ class FPN(nn.Module):
             num_classes = len(BRAILLE_CLASSES)
         
         self.num_classes = num_classes
-        self.strides = [ 4, 8, 16]  # Four levels for better coverage
-        self.scales = nn.Parameter(torch.tensor([16.0, 32.0, 64.0]))
+        self.strides = [4, 8, 16, 32]
+        self.scales  = nn.Parameter(torch.tensor([8.0, 4.0, 2.0, 2.0]))
 
         
         # Updated lateral connections for ResNet-50 channels
@@ -79,7 +79,9 @@ class FPN(nn.Module):
             nn.ReLU(inplace=True),
             ConvNorm(256, 256),
             nn.ReLU(inplace=True),
-            ConvNorm(256, 128),  # Reduce channels
+            ConvNorm(256, 256),
+            nn.ReLU(inplace=True),
+            ConvNorm(256, 128),  
             nn.ReLU(inplace=True),
         )
         
@@ -161,7 +163,7 @@ class FPN(nn.Module):
             
             # Regression branch  
             reg_features = self.regression_head(fpn_feature)
-            bbox_pred = F.relu(self.regression_to_bbox(reg_features)) * scale
+            bbox_pred = torch.exp(self.regression_to_bbox(fpn_feature)) * scale
             
             # Reshape outputs: B[C]HW -> BHW[C]
             classes = classes.permute(0, 2, 3, 1).contiguous()
