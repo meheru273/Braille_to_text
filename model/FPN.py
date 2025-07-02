@@ -163,7 +163,7 @@ class FPN(nn.Module):
             
             # Regression branch  
             reg_features = self.regression_head(fpn_feature)
-            bbox_pred = torch.exp(self.regression_to_bbox(fpn_feature)) * scale
+            bbox_pred = F.relu(self.regression_to_bbox(reg_features)) * scale
             
             # Reshape outputs: B[C]HW -> BHW[C]
             classes = classes.permute(0, 2, 3, 1).contiguous()

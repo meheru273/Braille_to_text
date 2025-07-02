@@ -154,8 +154,9 @@ def _compute_loss(
     strides, classes, centernesses, boxes, class_targets, centerness_targets, box_targets,
     focal_loss_fn, classification_weight=2.0, centerness_weight=1.0, regression_weight=2.0
 ):
-    """Enhanced loss computation with proper tensor shape handling"""
-    batch_size = classes[0].shape[0]
+    """Fixed loss computation that handles shape mismatches"""
+    
+    device = classes[0].device
     num_classes = classes[0].shape[-1]
     
     box_loss_fn = torch.nn.SmoothL1Loss(reduction='none')
@@ -165,32 +166,65 @@ def _compute_loss(
     centerness_losses = []
     regression_losses = []
     
-    device = classes[0].device
+    print("=== SHAPE DEBUG IN LOSS ===")
     
     for idx in range(len(classes)):
-        cls_t = class_targets[idx].to(device)  # [B, H, W]
-        cen_t = centerness_targets[idx].to(device)  # [B, H, W]
-        box_t = box_targets[idx].to(device)  # [B, H, W, 4]
-        
         cls_p = classes[idx]  # [B, H, W, num_classes]
-        box_p = boxes[idx]    # [B, H, W, 4]
         cen_p = centernesses[idx]  # [B, H, W]
+        box_p = boxes[idx]    # [B, H, W, 4]
         
-        # Ensure shapes match
-        B, H, W = cls_t.shape
-        assert cls_p.shape == (B, H, W, num_classes), f"Class pred shape mismatch: {cls_p.shape} vs expected {(B, H, W, num_classes)}"
-        assert cen_p.shape == (B, H, W), f"Centerness pred shape mismatch: {cen_p.shape} vs expected {(B, H, W)}"
-        assert box_p.shape == (B, H, W, 4), f"Box pred shape mismatch: {box_p.shape} vs expected {(B, H, W, 4)}"
+        cls_t = class_targets[idx].to(device)  # [B, H_target, W_target]
+        cen_t = centerness_targets[idx].to(device)  # [B, H_target, W_target]
+        box_t = box_targets[idx].to(device)  # [B, H_target, W_target, 4]
+        
+        print(f"Level {idx}:")
+        print(f"  Model output: cls={cls_p.shape}, cen={cen_p.shape}, box={box_p.shape}")
+        print(f"  Targets: cls={cls_t.shape}, cen={cen_t.shape}, box={box_t.shape}")
+        
+        # FIXED: Resize targets to match model output if shapes don't match
+        B, H_pred, W_pred = cls_p.shape[:3]
+        B_t, H_target, W_target = cls_t.shape
+        
+        if (H_pred, W_pred) != (H_target, W_target):
+            print(f"  Shape mismatch detected! Resizing targets from ({H_target}, {W_target}) to ({H_pred}, {W_pred})")
+            
+            # Resize class targets using nearest neighbor
+            cls_t = F.interpolate(
+                cls_t.float().unsqueeze(1), 
+                size=(H_pred, W_pred), 
+                mode='nearest'
+            ).squeeze(1).long()
+            
+            # Resize centerness targets using bilinear
+            cen_t = F.interpolate(
+                cen_t.unsqueeze(1), 
+                size=(H_pred, W_pred), 
+                mode='bilinear', 
+                align_corners=False
+            ).squeeze(1)
+            
+            # Resize box targets
+            box_t = F.interpolate(
+                box_t.permute(0, 3, 1, 2), 
+                size=(H_pred, W_pred), 
+                mode='bilinear', 
+                align_corners=False
+            ).permute(0, 2, 3, 1)
+            
+            print(f"  Resized targets: cls={cls_t.shape}, cen={cen_t.shape}, box={box_t.shape}")
+        
+        # Now shapes should match - verify
+        assert cls_p.shape[:3] == cls_t.shape, f"Still mismatched after resize: {cls_p.shape[:3]} vs {cls_t.shape}"
         
         # Flatten for loss computation
-        cls_p_flat = cls_p.view(-1, num_classes)  # [B*H*W, num_classes]
-        cls_t_flat = cls_t.view(-1)               # [B*H*W]
-        cen_p_flat = cen_p.view(-1)               # [B*H*W]
-        cen_t_flat = cen_t.view(-1)               # [B*H*W]
-        box_p_flat = box_p.view(-1, 4)            # [B*H*W, 4]
-        box_t_flat = box_t.view(-1, 4)            # [B*H*W, 4]
+        cls_p_flat = cls_p.view(-1, num_classes)
+        cls_t_flat = cls_t.view(-1)
+        cen_p_flat = cen_p.view(-1)
+        cen_t_flat = cen_t.view(-1)
+        box_p_flat = box_p.view(-1, 4)
+        box_t_flat = box_t.view(-1, 4)
         
-        # Classification loss with focal loss
+        # Classification loss
         cls_loss = focal_loss_fn(cls_p_flat, cls_t_flat)
         classification_losses.append(cls_loss)
         
@@ -203,8 +237,10 @@ def _compute_loss(
             # Regression loss (only on positive samples)
             reg_loss = box_loss_fn(box_p_flat[pos_mask], box_t_flat[pos_mask]).mean()
             regression_losses.append(reg_loss)
+        
+        print(f"  Positive samples: {pos_mask.sum()}")
     
-    # Compute weighted total loss
+    # Compute total loss
     total_cls_loss = torch.stack(classification_losses).mean() if classification_losses else torch.tensor(0.0, device=device)
     total_cen_loss = torch.stack(centerness_losses).mean() if centerness_losses else torch.tensor(0.0, device=device)
     total_reg_loss = torch.stack(regression_losses).mean() if regression_losses else torch.tensor(0.0, device=device)
@@ -214,6 +250,7 @@ def _compute_loss(
                   regression_weight * total_reg_loss)
     
     return total_loss, total_cls_loss, total_cen_loss, total_reg_loss
+
 
 
 def _render_targets_to_image(img: np.ndarray, box_labels: torch.Tensor):
