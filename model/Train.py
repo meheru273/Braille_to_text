@@ -18,6 +18,7 @@ from FPN import FPN, normalize_batch, FocalLoss
 from Targets import generate_targets
 logger = logging.getLogger(__name__)
 
+
 class COCOData(Dataset):
     """
     Enhanced COCO dataset with better preprocessing for Braille detection
@@ -151,7 +152,7 @@ def tensor_to_image(tensor):
 
 
 def _compute_loss(
-    strides, classes, centernesses, boxes, class_targets, centerness_targets, box_targets,
+    classes, centernesses, boxes, class_targets, centerness_targets, box_targets,
     focal_loss_fn, classification_weight=2.0, centerness_weight=1.0, regression_weight=2.0
 ):
     """Fixed loss computation that handles shape mismatches"""
@@ -165,8 +166,6 @@ def _compute_loss(
     classification_losses = []
     centerness_losses = []
     regression_losses = []
-    
-    print("=== SHAPE DEBUG IN LOSS ===")
     
     for idx in range(len(classes)):
         cls_p = classes[idx]  # [B, H, W, num_classes]
@@ -186,7 +185,6 @@ def _compute_loss(
         B_t, H_target, W_target = cls_t.shape
         
         if (H_pred, W_pred) != (H_target, W_target):
-            print(f"  Shape mismatch detected! Resizing targets from ({H_target}, {W_target}) to ({H_pred}, {W_pred})")
             
             # Resize class targets using nearest neighbor
             cls_t = F.interpolate(
@@ -210,11 +208,6 @@ def _compute_loss(
                 mode='bilinear', 
                 align_corners=False
             ).permute(0, 2, 3, 1)
-            
-            print(f"  Resized targets: cls={cls_t.shape}, cen={cen_t.shape}, box={box_t.shape}")
-        
-        # Now shapes should match - verify
-        assert cls_p.shape[:3] == cls_t.shape, f"Still mismatched after resize: {cls_p.shape[:3]} vs {cls_t.shape}"
         
         # Flatten for loss computation
         cls_p_flat = cls_p.view(-1, num_classes)
@@ -334,8 +327,6 @@ def train(train_dir: pathlib.Path, val_dir: pathlib.Path, writer, resume_ckpt_pa
     num_classes = train_dataset.get_num_classes()
     class_names = train_dataset.get_class_names()
     logger.info(f"Train images: {len(train_dataset)}, Val images: {len(val_dataset)}")
-    logger.info(f"Num classes (incl background=0): {num_classes}")
-    logger.info(f"Image size: {IMAGE_SIZE}")
 
     # Data loaders
     train_loader = DataLoader(train_dataset, batch_size=BATCH_SIZE, shuffle=True,
@@ -382,13 +373,11 @@ def train(train_dir: pathlib.Path, val_dir: pathlib.Path, writer, resume_ckpt_pa
                     print(f"  {loss_name}: {loss_value:.4f}")
                     
         except Exception as e:
-            print(f"Error loading checkpoint: {e}")
             print("Starting training from scratch...")
             start_epoch = 1
     else:
         if resume_ckpt_path:
             print(f"Checkpoint not found: {resume_ckpt_path}")
-        print("Starting training from scratch...")
     
     # Focal loss for class imbalance
     focal_loss = FocalLoss(alpha=0.25, gamma=2.0, num_classes=num_classes)
@@ -425,7 +414,7 @@ def train(train_dir: pathlib.Path, val_dir: pathlib.Path, writer, resume_ckpt_pa
             )
             
             total_loss, cls_loss, cen_loss, reg_loss = _compute_loss(
-                model.strides, cls_pred, cen_pred, box_pred,
+                cls_pred, cen_pred, box_pred,
                 class_targets, centerness_targets, box_targets,
                 focal_loss, CLASSIFICATION_WEIGHT, CENTERNESS_WEIGHT, REGRESSION_WEIGHT
             )

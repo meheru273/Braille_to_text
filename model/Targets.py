@@ -11,9 +11,6 @@ def generate_targets(
     """
     Generate targets for FCOS with proper error handling and return statement
     """
-    print(f"generate_targets called with img_shape: {img_shape}")
-    print(f"Number of strides: {len(strides)}")
-    print(f"Strides: {strides}")
     
     if not len(box_labels_by_batch) == len(class_labels_by_batch) == img_shape[0]:
         raise ValueError("labels and batch size must match")
@@ -119,7 +116,6 @@ def generate_targets(
             centerness_target_by_feature.append(centerness_target_for_feature)
             box_targets_by_feature.append(box_target_for_feature)
 
-        print(f"Successfully generated targets for {len(class_targets_by_feature)} levels")
         # Debug: Check if targets are actually being created
         for i, (class_targets, centerness_targets, box_targets) in enumerate(zip(class_targets_by_feature, centerness_target_by_feature, box_targets_by_feature)):
             positive_samples = (class_targets > 0).sum()
