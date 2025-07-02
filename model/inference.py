@@ -19,14 +19,6 @@ class Detection:
     object_class: int
     bbox: np.ndarray  # (min_x, min_y, max_x, max_y)
 
-def tensor_to_image(tensor: torch.Tensor) -> np.ndarray:
-    """Convert a torch tensor [C,H,W] in [0,1] or [0,255] to uint8 HWC image"""
-    arr = tensor.detach().cpu().numpy()
-    # if in [0,1], scale
-    if arr.max() <= 1.0:
-        arr = arr * 255.0
-    img = arr.transpose(1,2,0)
-    return img.astype(np.uint8)
 
 def render_detections_to_image(img: np.ndarray, detections: List[Detection]):
     # Ensure img is a contiguous uint8 NumPy array
@@ -46,9 +38,6 @@ def compute_detections(model: FPN, img: np.ndarray, device) -> List[Detection]:
     """
     model.eval()
     # 1. Convert img (NumPy HWC) to tensor [1,3,H,W], float in [0,1]
-    import torch
-    import numpy as np
-    from inference import detections_from_network_output, normalize_batch, tensor_to_image  # adjust imports
 
     # If img is uint8 [0,255], convert:
     if img.dtype == np.uint8:
@@ -250,7 +239,7 @@ def _gather_detections(classes, centernesses, boxes, max_detections=DEFAULT_MAX_
         top_classes_i = torch.index_select(class_indices_i, 0, top_detection_indices)
         top_scores_i = torch.index_select(class_scores_i, 0, top_detection_indices)
 
-        boxes_to_keep = torchvision.ops.nms(top_boxes_i, top_scores_i, 0.6)
+        boxes_to_keep = torchvision.ops.nms(top_boxes_i, top_scores_i, 0.3)
 
         top_boxes_i = top_boxes_i[boxes_to_keep]
         top_classes_i = top_classes_i[boxes_to_keep]
@@ -262,3 +251,33 @@ def _gather_detections(classes, centernesses, boxes, max_detections=DEFAULT_MAX_
 
     return boxes_by_batch, classes_by_batch, scores_by_batch
 
+def tensor_to_image(tensor: torch.Tensor) -> np.ndarray:
+    """
+    Convert a torch tensor [C,H,W] in [0,1] or [0,255] to uint8 HWC image
+    
+    Args:
+        tensor: PyTorch tensor of shape [C, H, W] where C is channels (usually 3)
+        
+    Returns:
+        numpy array of shape [H, W, C] with dtype uint8, values in [0, 255]
+    """
+    # Detach from computation graph and move to CPU
+    arr = tensor.detach().cpu().numpy()
+    
+    # Handle different input ranges
+    if arr.max() <= 1.0:
+        # Input is in [0, 1] range, scale to [0, 255]
+        arr = arr * 255.0
+    
+    # Convert from CHW to HWC format
+    if len(arr.shape) == 3:  # [C, H, W]
+        img = arr.transpose(1, 2, 0)  # [H, W, C]
+    elif len(arr.shape) == 2:  # [H, W] - grayscale
+        img = arr
+    else:
+        raise ValueError(f"Unexpected tensor shape: {arr.shape}")
+    
+    # Clip values to valid range and convert to uint8
+    img = np.clip(img, 0, 255).astype(np.uint8)
+    
+    return img

@@ -3,150 +3,150 @@ import torch.nn as nn
 import torch.nn.functional as F 
 import math
 from typing import List, Tuple
-from torchvision.transforms import Normalize
 
-# Braille character classes - 64 possible combinations (2^6) plus background
+# Braille character classes
 BRAILLE_CLASSES = [
     "BACKGROUND",
-    # Basic Braille characters (Grade 1)
     "a", "b", "c", "d", "e", "f", "g", "h", "i", "j",
     "k", "l", "m", "n", "o", "p", "q", "r", "s", "t",
     "u", "v", "w", "x", "y", "z"
 ]
 
-def ConvNorm(in_channels: int, out_channels: int, kernel_size=3, padding=1, stride=1) -> nn.Module:
-    """
-    Convolution with GroupNorm - adapted for Braille detection
-    """
-    num_groups = min(32, in_channels // 2) if in_channels >= 32 else in_channels
-    num_groups = max(1, num_groups)  # Ensure at least 1 group
+def ConvNorm(in_channels, out_channels, kernel_size=3, padding=1, stride=1):
+    num_groups = min(32, in_channels // 4) if in_channels >= 32 else max(1, in_channels // 2)
     return nn.Sequential(
-        nn.GroupNorm(num_groups, in_channels),
-        nn.Conv2d(in_channels, out_channels, kernel_size=kernel_size, padding=padding, stride=stride),
+        nn.Conv2d(in_channels, out_channels, kernel_size, stride, padding, bias=False),
+        nn.GroupNorm(num_groups, out_channels)  # Normalize after convolution
     )
 
 def _upsample(x: torch.Tensor, size) -> torch.Tensor:
-    """Upsample tensor to specified size using bilinear interpolation."""
-    return F.interpolate(x, size=size, mode="bilinear", align_corners=True)
+    """Upsample tensor using bilinear interpolation"""
+    return F.interpolate(x, size=size, mode="bilinear", align_corners=False)
+
+class FocalLoss(nn.Module):
+    """Focal Loss for handling class imbalance"""
+    def __init__(self, alpha=0.25, gamma=2.0, num_classes=28):
+        super().__init__()
+        self.alpha = alpha
+        self.gamma = gamma
+        self.num_classes = num_classes
+    
+    def forward(self, inputs, targets):
+        # inputs: [N, num_classes], targets: [N] (class indices)
+        ce_loss = F.cross_entropy(inputs, targets, reduction='none')
+        pt = torch.exp(-ce_loss)
+        focal_loss = self.alpha * (1 - pt) ** self.gamma * ce_loss
+        return focal_loss.mean()
 
 class FPN(nn.Module):
     """
-    Feature Pyramid Network adapted for Braille character detection
+    Optimized FPN for small Braille character detection
     """
     
     def __init__(self, num_classes=None):
         super(FPN, self).__init__()
         
-        # Import your backbone (assuming it returns C2, C3, C4, C5 features)
         from BackBone import BackBone
-        self.backbone = BackBone()
+        self.backbone = BackBone(pretrained=True)  # Enable pretraining
         
         if num_classes is None:
             num_classes = len(BRAILLE_CLASSES)
         
         self.num_classes = num_classes
-        self.strides = [8, 16, 32, 64, 128]  # FPN level strides
+        self.strides = [ 4, 8, 16]  # Four levels for better coverage
+        self.scales = nn.Parameter(torch.tensor([16.0, 32.0, 64.0]))
+
         
-        # Learnable scales for each FPN level (smaller for Braille characters)
-        self.scales = nn.Parameter(torch.tensor([4.0, 8.0, 16.0, 32.0, 64.0]))
-        
-        # FPN lateral connections (matching your backbone channel sizes)
-        # BackBone outputs: c2(64), c3(128), c4(256), c5(512)
+        # Updated lateral connections for ResNet-50 channels
         self.lateral_convs = nn.ModuleList([
-            self._make_lateral_conv(64, 256),   # C2 -> P2
-            self._make_lateral_conv(128, 256),  # C3 -> P3
-            self._make_lateral_conv(256, 256),  # C4 -> P4  
-            self._make_lateral_conv(512, 256),  # C5 -> P5
+            self._make_lateral_conv(256, 256),   # C2 -> P2
+            self._make_lateral_conv(512, 256),   # C3 -> P3
+            self._make_lateral_conv(1024, 256),  # C4 -> P4  
+            self._make_lateral_conv(2048, 256),  # C5 -> P5
         ])
         
-        # Extra FPN levels
+        # Extra FPN levels with different approach
         self.extra_convs = nn.ModuleList([
             ConvNorm(256, 256, stride=2),  # P5 -> P6
-            ConvNorm(256, 256, stride=2),  # P6 -> P7
         ])
         
-        # Classification head - specialized for Braille
+        # Add P1 level for very small objects (stride 4)
+        self.p1_conv = ConvNorm(256, 256, stride=1)  # P2 -> P1 (no downsampling)
+        
+        # Lighter detection heads for faster training
         self.classification_head = nn.Sequential(
             ConvNorm(256, 256),
             nn.ReLU(inplace=True),
             ConvNorm(256, 256),
             nn.ReLU(inplace=True),
-            ConvNorm(256, 256),
-            nn.ReLU(inplace=True),
-            ConvNorm(256, 256),
+            ConvNorm(256, 128),  # Reduce channels
             nn.ReLU(inplace=True),
         )
         
         # Output layers
-        self.classification_to_class = ConvNorm(256, self.num_classes)
-        self.classification_to_centerness = ConvNorm(256, 1)
+        self.classification_to_class = nn.Conv2d(128, self.num_classes, kernel_size=3, padding=1)
+        self.classification_to_centerness = nn.Conv2d(128, 1, kernel_size=3, padding=1)
         
-        # Regression head - for Braille character bounding boxes
+        # Regression head
         self.regression_head = nn.Sequential(
             ConvNorm(256, 256),
             nn.ReLU(inplace=True),
             ConvNorm(256, 256),
             nn.ReLU(inplace=True),
-            ConvNorm(256, 256),
-            nn.ReLU(inplace=True),
-            ConvNorm(256, 256),
+            ConvNorm(256, 128),  # Reduce channels
             nn.ReLU(inplace=True),
         )
         
-        self.regression_to_bbox = ConvNorm(256, 4)  # [left, top, right, bottom] distances
+        self.regression_to_bbox = nn.Conv2d(128, 4, kernel_size=3, padding=1)
+        
+        # Loss function
+        self.focal_loss = FocalLoss(alpha=0.25, gamma=2.0, num_classes=num_classes)
         
         # Initialize weights
         self._initialize_weights()
     
     def _make_lateral_conv(self, in_channels: int, out_channels: int) -> nn.Module:
         """Create lateral connection layer"""
-        return ConvNorm(in_channels, out_channels, kernel_size=1, padding=0)
+        return nn.Conv2d(in_channels, out_channels, kernel_size=1, bias=False)
     
     def _initialize_weights(self):
-        """Initialize weights for stable training"""
-        for modules in [
-            self.lateral_convs,
-            self.extra_convs,
-            self.classification_head,
-            self.regression_head,
-            self.classification_to_class,
-            self.classification_to_centerness,
-            self.regression_to_bbox,
-        ]:
-            for module in modules:
-                for layer in module.modules():
-                    if isinstance(layer, nn.Conv2d):
-                        nn.init.normal_(layer.weight, std=0.01)
-                        if layer.bias is not None:
-                            nn.init.constant_(layer.bias, 0)
+        """Improved weight initialization"""
+        for m in self.modules():
+            if isinstance(m, nn.Conv2d):
+                nn.init.kaiming_normal_(m.weight, mode='fan_out', nonlinearity='relu')
+                if m.bias is not None:
+                    nn.init.constant_(m.bias, 0)
+            elif isinstance(m, nn.GroupNorm):
+                nn.init.constant_(m.weight, 1)
+                nn.init.constant_(m.bias, 0)
         
-        # Special initialization for classification (focal loss style)
+        # Special initialization for classification output
         prior_prob = 0.01
         bias_value = -math.log((1 - prior_prob) / prior_prob)
-        if hasattr(self.classification_to_class, '__getitem__'):
-            # Sequential module
-            for module in self.classification_to_class:
-                if isinstance(module, nn.Conv2d) and module.bias is not None:
-                    nn.init.constant_(module.bias, bias_value)
+        nn.init.constant_(self.classification_to_class.bias, bias_value)
+        
+        # Initialize centerness and regression outputs
+        nn.init.normal_(self.classification_to_centerness.weight, std=0.01)
+        nn.init.constant_(self.classification_to_centerness.bias, 0)
+        nn.init.normal_(self.regression_to_bbox.weight, std=0.01)
+        nn.init.constant_(self.regression_to_bbox.bias, 0)
     
     def forward(self, x: torch.Tensor) -> Tuple[List[torch.Tensor], List[torch.Tensor], List[torch.Tensor]]:
-        
-        # BackBone returns 4 feature maps: c2, c3, c4, c5
+        # Backbone forward
         backbone_features = self.backbone(x)   
         c2, c3, c4, c5 = backbone_features
         
         # Build FPN pyramid
-        p5 = self.lateral_convs[3](c5)  # C5 -> P5
-        p4 = self.lateral_convs[2](c4) + _upsample(p5, c4.shape[2:])  # C4 + P5_up -> P4
-        p3 = self.lateral_convs[1](c3) + _upsample(p4, c3.shape[2:])  # C3 + P4_up -> P3
-        p2 = self.lateral_convs[0](c2) + _upsample(p3, c2.shape[2:])  # C2 + P3_up -> P2
+        p5 = self.lateral_convs[3](c5)
+        p4 = self.lateral_convs[2](c4) + _upsample(p5, c4.shape[2:])
+        p3 = self.lateral_convs[1](c3) + _upsample(p4, c3.shape[2:])
+        p2 = self.lateral_convs[0](c2) + _upsample(p3, c2.shape[2:])
         
-        # Extra levels
+        # Add P6 level
         p6 = self.extra_convs[0](p5)
-        p7 = self.extra_convs[1](p6)
         
-        # Use P3-P7 instead of P2-P6 for better performance with small objects
-        fpn_features = [p3, p4, p5, p6, p7]
+        # IMPORTANT: Use P2-P6 (stride 4,8,16,32,64) - Remove any P1 level
+        fpn_features = [p2, p3, p4, p5, p6]  # This should match your strides [4,8,16,32,64]
         
         # Apply detection heads
         classes_by_feature = []
@@ -156,12 +156,12 @@ class FPN(nn.Module):
         for scale, fpn_feature in zip(self.scales, fpn_features):
             # Classification branch
             cls_features = self.classification_head(fpn_feature)
-            classes = self.classification_to_class(cls_features).sigmoid()
-            centerness = self.classification_to_centerness(cls_features).sigmoid()
+            classes = self.classification_to_class(cls_features)
+            centerness = torch.sigmoid(self.classification_to_centerness(cls_features))
             
-            # Regression branch
+            # Regression branch  
             reg_features = self.regression_head(fpn_feature)
-            bbox_pred = torch.exp(self.regression_to_bbox(reg_features)) * scale
+            bbox_pred = F.relu(self.regression_to_bbox(reg_features)) * scale
             
             # Reshape outputs: B[C]HW -> BHW[C]
             classes = classes.permute(0, 2, 3, 1).contiguous()
@@ -176,15 +176,15 @@ class FPN(nn.Module):
 
 def normalize_batch(x: torch.Tensor) -> torch.Tensor:
     """
-    Fixed normalization function - normalize each image in-place
+    Proper normalization for training and inference consistency
     """
-    # Convert from 0-1 range to 0-255 range if needed
-    if x.max() <= 1.0:
-        x = x * 255.0
+    # Ensure input is in [0, 1] range
+    if x.max() > 1.0:
+        x = x / 255.0
     
     # ImageNet normalization
-    mean = torch.tensor([0.485, 0.456, 0.406]).to(x.device).view(1, 3, 1, 1) * 255.0
-    std = torch.tensor([0.229, 0.224, 0.225]).to(x.device).view(1, 3, 1, 1) * 255.0
+    mean = torch.tensor([0.485, 0.456, 0.406]).to(x.device).view(1, 3, 1, 1)
+    std = torch.tensor([0.229, 0.224, 0.225]).to(x.device).view(1, 3, 1, 1)
     
     x = (x - mean) / std
     return x
