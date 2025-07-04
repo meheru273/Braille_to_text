@@ -11,12 +11,12 @@ os.environ["KMP_DUPLICATE_LIB_OK"] = "TRUE"
 # 1. Load model
 num_classes = 28
 model = FPN(num_classes=num_classes)
-ckpt = torch.load("runs/fcos_enhanced/fcos_epoch42.pth", map_location="cpu", weights_only=False)
+ckpt = torch.load("runs/fcos_custom/fcos_epoch20.pth", map_location="cpu", weights_only=False)
 model.load_state_dict(ckpt["model_state"])
 model.eval()
 
 # 2. Load and preprocess image
-img_path = "B38.jpg"
+img_path = "before2.jpg"
 img_bgr = cv2.imread(img_path)
 img_rgb = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2RGB)
 print(f"Original image shape: {img_rgb.shape}")

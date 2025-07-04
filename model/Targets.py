@@ -23,8 +23,7 @@ def generate_targets(
     box_targets_by_feature = []
 
     # Size ranges for 5 FPN levels
-    m = (5,25,45,65,85, math.inf)
-
+    m = (0, 20, 40, 65, 160, 320, math.inf)
     try:
         for i, stride in enumerate(strides):
             # print(f"Processing level {i}, stride {stride}")
