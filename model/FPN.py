@@ -57,8 +57,8 @@ class FPN(nn.Module):
         
         # FIXED: Consistent configuration for 5 levels
         self.strides = [4, 8, 16, 32, 64]
-        # FIXED: Increasing scales optimized for Braille characters (20-60 pixels)
-        self.scales = nn.Parameter(torch.tensor([32.0, 64.0, 128.0, 256.0, 512.0]))
+        self.scales = nn.Parameter(torch.tensor([6.0, 4.0, 4.0, 3.0, 2.0]))
+
         
         # FIXED: 5 CBAM modules for 5 FPN levels
         self.fpn_cbam = nn.ModuleList([
@@ -86,6 +86,8 @@ class FPN(nn.Module):
             nn.ReLU(inplace=True),
             ConvNorm(256, 256),
             nn.ReLU(inplace=True),
+            ConvNorm(256, 256),
+            nn.ReLU(inplace=True),
             ConvNorm(256, 128),  # Reduce to 128 channels
             nn.ReLU(inplace=True),
         )
@@ -96,6 +98,8 @@ class FPN(nn.Module):
         
         # Regression head
         self.regression_head = nn.Sequential(
+            ConvNorm(256, 256),
+            nn.ReLU(inplace=True),
             ConvNorm(256, 256),
             nn.ReLU(inplace=True),
             ConvNorm(256, 256),
