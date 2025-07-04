@@ -51,10 +51,13 @@ class FPN(nn.Module):
         
         if num_classes is None:
             num_classes = len(BRAILLE_CLASSES)
-        
+        from CBAM import CBAM
+        self.fpn_cbam = nn.ModuleList([
+            CBAM(256, reduction=8) for _ in range(4)  # For P2, P3, P4, P5
+        ])
         self.num_classes = num_classes
-        self.strides = [4, 8, 16, 32]
-        self.scales  = nn.Parameter(torch.tensor([8.0, 4.0, 2.0, 2.0]))
+        self.strides = [4, 8, 16, 32,64]
+        self.scales  = nn.Parameter(torch.tensor([8.0, 4.0, 2.0, 2.0,2.0]))
 
         
         # Updated lateral connections for ResNet-50 channels
@@ -144,6 +147,11 @@ class FPN(nn.Module):
         p3 = self.lateral_convs[1](c3) + _upsample(p4, c3.shape[2:])
         p2 = self.lateral_convs[0](c2) + _upsample(p3, c2.shape[2:])
         
+        p2 = self.fpn_cbam[0](p2)  # Critical for fine details
+        p3 = self.fpn_cbam[1](p3)  # Main level for Braille
+        p4 = self.fpn_cbam[2](p4)  # Larger characters
+        p5 = self.fpn_cbam[3](p5) 
+        
         # Add P6 level
         p6 = self.extra_convs[0](p5)
         
@@ -163,7 +171,8 @@ class FPN(nn.Module):
             
             # Regression branch  
             reg_features = self.regression_head(fpn_feature)
-            bbox_pred = F.relu(self.regression_to_bbox(reg_features)) * scale
+            bbox_pred = bbox_pred = torch.exp(self.regression_to_bbox(reg_features)) * scale
+
             
             # Reshape outputs: B[C]HW -> BHW[C]
             classes = classes.permute(0, 2, 3, 1).contiguous()

@@ -23,11 +23,11 @@ def generate_targets(
     box_targets_by_feature = []
 
     # Size ranges for 5 FPN levels
-    m = (0, 64, 128, 256, math.inf)
+    m = (5,25,45,65, math.inf)
 
     try:
         for i, stride in enumerate(strides):
-            print(f"Processing level {i}, stride {stride}")
+            # print(f"Processing level {i}, stride {stride}")
             
             feat_h = int(img_h / stride)
             feat_w = int(img_w / stride)
@@ -119,10 +119,10 @@ def generate_targets(
         # Debug: Check if targets are actually being created
         for i, (class_targets, centerness_targets, box_targets) in enumerate(zip(class_targets_by_feature, centerness_target_by_feature, box_targets_by_feature)):
             positive_samples = (class_targets > 0).sum()
-            print(f"Level {i}: Positive samples = {positive_samples}")
-            if positive_samples > 0:
-                print(f"  Class range: {class_targets.min()}-{class_targets.max()}")
-                print(f"  Centerness range: {centerness_targets.min():.4f}-{centerness_targets.max():.4f}")
+            # print(f"Level {i}: Positive samples = {positive_samples}")
+            # if positive_samples > 0:
+            #     print(f"  Class range: {class_targets.min()}-{class_targets.max()}")
+            #     print(f"  Centerness range: {centerness_targets.min():.4f}-{centerness_targets.max():.4f}")
         # IMPORTANT: Make sure we return the tuple
         return class_targets_by_feature, centerness_target_by_feature, box_targets_by_feature
         

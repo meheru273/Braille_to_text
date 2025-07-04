@@ -11,7 +11,7 @@ os.environ["KMP_DUPLICATE_LIB_OK"] = "TRUE"
 # 1. Load model
 num_classes = 28
 model = FPN(num_classes=num_classes)
-ckpt = torch.load("runs/fcos_enhanced/fcos_epoch33.pth", map_location="cpu", weights_only=False)
+ckpt = torch.load("runs/fcos_enhanced/fcos_epoch42.pth", map_location="cpu", weights_only=False)
 model.load_state_dict(ckpt["model_state"])
 model.eval()
 

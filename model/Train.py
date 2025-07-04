@@ -260,21 +260,22 @@ def _render_targets_to_image(img: np.ndarray, box_labels: torch.Tensor):
 def unfreeze_backbone_gradually(model, epoch):
     """Gradually unfreeze backbone layers during training"""
     if hasattr(model, 'backbone') and hasattr(model.backbone, 'layer4'):
-        if epoch == 10:
+        if epoch == 5:
             # Unfreeze layer4
             for param in model.backbone.layer4.parameters():
                 param.requires_grad = True
-            print("Unfroze backbone layer4")
-        elif epoch == 20:
+        elif epoch == 10:
             # Unfreeze layer3
             for param in model.backbone.layer3.parameters():
                 param.requires_grad = True
-            print("Unfroze backbone layer3")
-        elif epoch == 30:
+        elif epoch == 20:
             # Unfreeze layer2
             for param in model.backbone.layer2.parameters():
                 param.requires_grad = True
-            print("Unfroze backbone layer2")
+        elif epoch == 30:
+            # Unfreeze layer2
+            for param in model.backbone.layer1.parameters():
+                param.requires_grad = True
 
 
 def create_optimizer(model, base_lr=1e-4):
@@ -352,7 +353,7 @@ def train(train_dir: pathlib.Path, val_dir: pathlib.Path, writer, resume_ckpt_pa
     
     # FIXED: Resume from checkpoint with weights_only=False
     if resume_ckpt_path is not None and os.path.exists(resume_ckpt_path):
-        print(f"Resuming from checkpoint: {resume_ckpt_path}")
+       
         try:
             # Fix for PyTorch 2.6 - add weights_only=False
             checkpoint = torch.load(resume_ckpt_path, map_location=device, weights_only=False)
@@ -362,7 +363,6 @@ def train(train_dir: pathlib.Path, val_dir: pathlib.Path, writer, resume_ckpt_pa
             scheduler.load_state_dict(checkpoint['scheduler_state'])
             start_epoch = checkpoint['epoch'] + 1
             
-            print(f"Successfully resumed from epoch {checkpoint['epoch']}")
             print(f"Will start training from epoch {start_epoch}")
             
             # Print previous training losses if available
@@ -479,7 +479,7 @@ def train(train_dir: pathlib.Path, val_dir: pathlib.Path, writer, resume_ckpt_pa
                                    f"{len(box_labels[0])} ground truth boxes")
 
         # Save checkpoint every 3 epochs
-        if epoch % 3 == 0 or epoch == NUM_EPOCHS:
+        if epoch % 10 == 0 or epoch == NUM_EPOCHS:
             ckpt_path = os.path.join(writer.log_dir, f"fcos_epoch{epoch}.pth")
             torch.save({
                 'model_state': model.state_dict(),
