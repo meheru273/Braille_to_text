@@ -23,7 +23,7 @@ def generate_targets(
     box_targets_by_feature = []
 
     # Size ranges for 5 FPN levels
-    m = (5,25,45,65, math.inf)
+    m = (5,25,45,65,85, math.inf)
 
     try:
         for i, stride in enumerate(strides):
