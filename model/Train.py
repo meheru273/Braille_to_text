@@ -112,9 +112,8 @@ class COCOData(Dataset):
         return ['__background__'] + [c['name'] for c in cats]
 
 def collate_fn(batch):
-    imgs, labels, boxes = zip(*batch)
-    imgs = torch.stack(imgs, dim=0)
-    return imgs, list(labels), list(boxes)
+    imgs, lbls, bxs = zip(*batch)
+    return torch.stack(imgs), list(lbls), list(bxs)
 
 
 def tensor_to_image(tensor):
@@ -372,8 +371,9 @@ def train(train_dir: pathlib.Path, val_dir: pathlib.Path, writer, resume_ckpt_pa
             cls_pred, cen_pred, box_pred = model(batch_norm)
             
             # Generate targets
+            debug_enabled = (epoch == 1 and batch_idx < 3)  # Debug first 3 batches of first epoch
             class_targets, centerness_targets, box_targets = generate_targets(
-                x.shape, class_labels, box_labels, model.strides
+                x.shape, class_labels, box_labels, model.strides, debug=debug_enabled
             )
             
             total_loss, cls_loss, cen_loss, reg_loss = _compute_loss(

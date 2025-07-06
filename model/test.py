@@ -165,7 +165,7 @@ def tensor_to_image(tensor):
 # 1. Load model
 num_classes = 28
 model = FPN(num_classes=num_classes)
-ckpt = torch.load("runs/fcos_custom/fcos_epoch20.pth", map_location="cpu", weights_only=False)
+ckpt = torch.load("runs/fcos_custom/fcos_epoch10.pth", map_location="cpu", weights_only=False)
 model.load_state_dict(ckpt["model_state"])
 model.eval()
 
