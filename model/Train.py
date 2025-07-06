@@ -33,7 +33,7 @@ class COCOData(Dataset):
     def __init__(self,
                  split_dir: pathlib.Path,
                  image_size=(800, 1200),
-                 min_area=16,
+                 min_area=6,
                  max_detections=None):
         self.split_dir = pathlib.Path(split_dir)
         if not self.split_dir.exists():
@@ -83,6 +83,7 @@ class COCOData(Dataset):
         ann_ids = self.coco.getAnnIds(imgIds=img_id)
         anns = self.coco.loadAnns(ann_ids)
         boxes, labels = [], []
+        print(f"Image {idx}: loaded {len(anns)} raw annotations")
         for ann in anns:
             x, y, w, h = ann['bbox']
             if w * h < self.min_area:
@@ -92,14 +93,17 @@ class COCOData(Dataset):
             y1n = y1 * scale + paste_y
             x2n = x2 * scale + paste_x
             y2n = y2 * scale + paste_y
+            print(f"    Transformed: ({x1n:.1f}, {y1n:.1f}, {x2n:.1f}, {y2n:.1f})")
             x1n, y1n = max(0, x1n), max(0, y1n)
             x2n, y2n = min(target_w, x2n), min(target_h, y2n)
+            
             if x2n > x1n and y2n > y1n:
                 if (x2n - x1n) * (y2n - y1n) >= self.min_area:
                     boxes.append([x1n, y1n, x2n, y2n])
                     labels.append(self.cat_id_to_contiguous[ann['category_id']])
                     if self.max_detections and len(boxes) >= self.max_detections:
                         break
+                print(f"    Final: ({x1n:.1f}, {y1n:.1f}, {x2n:.1f}, {y2n:.1f})")
         if boxes:
             return img_tensor, torch.tensor(labels, dtype=torch.long), torch.tensor(boxes, dtype=torch.float32)
         return img_tensor, torch.zeros((0,), dtype=torch.long), torch.zeros((0,4), dtype=torch.float32)
@@ -291,8 +295,8 @@ def train(train_dir: pathlib.Path, val_dir: pathlib.Path, writer, resume_ckpt_pa
         raise FileNotFoundError(f"Validation directory not found: {val_dir.absolute()}")
     
     print("Creating datasets...")
-    train_dataset = COCOData(train_dir, image_size=IMAGE_SIZE, min_area=16)
-    val_dataset = COCOData(val_dir, image_size=IMAGE_SIZE, min_area=16)
+    train_dataset = COCOData(train_dir, image_size=IMAGE_SIZE, min_area=6)
+    val_dataset = COCOData(val_dir, image_size=IMAGE_SIZE, min_area=6)
 
     num_classes = train_dataset.get_num_classes()
     class_names = train_dataset.get_class_names()
