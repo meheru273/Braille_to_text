@@ -103,7 +103,13 @@ class COCOData(Dataset):
         if boxes:
             return img_tensor, torch.tensor(labels, dtype=torch.long), torch.tensor(boxes, dtype=torch.float32)
         return img_tensor, torch.zeros((0,), dtype=torch.long), torch.zeros((0,4), dtype=torch.float32)
+    def get_num_classes(self):
+        return self.num_classes
 
+    def get_class_names(self):
+        cats = self.coco.loadCats(self.coco.getCatIds())
+        cats = sorted(cats, key=lambda x: x['id'])
+        return ['__background__'] + [c['name'] for c in cats]
 
 def collate_fn(batch):
     imgs, labels, boxes = zip(*batch)
