@@ -20,122 +20,83 @@ logger = logging.getLogger(__name__)
 
 
 class COCOData(Dataset):
-    """
-    Enhanced COCO dataset with better preprocessing for Braille detection
-    """
-    def __init__(self,
-                 split_dir: pathlib.Path,
-                 image_size=(800, 1200),  
-                 min_area=16,  
-                 max_detections=None):
-        """
-        Args:
-            split_dir: path to folder with images and annotation JSON
-            image_size: (H, W) to resize images to - using 512x768 for better aspect ratio
-            min_area: filter out small GT boxes (< min_area in resized pixels)
-            max_detections: cap number of boxes per image
-        """
-        self.split_dir = pathlib.Path(split_dir)
-        if not self.split_dir.exists():
-            raise FileNotFoundError(f"Folder not found: {self.split_dir}")
-        
-        # Find the JSON annotation file in split_dir
-        jsons = list(self.split_dir.glob("*.json"))
-        if not jsons:
-            raise FileNotFoundError(f"No JSON annotation file in {self.split_dir}")
-        
-        ann_file = None
-        for jf in jsons:
-            if "annotation" in jf.name.lower():
-                ann_file = jf
-                break
-        if ann_file is None:
-            ann_file = jsons[0]
-        
-        print(f"Loading COCO annotations from: {ann_file}")
-        self.coco = COCO(str(ann_file))
-
-        # Images are directly in split_dir
-        self.images_dir = self.split_dir
-        self.image_ids = list(self.coco.imgs.keys())
-
-        self.image_size = image_size
-        self.transforms = [Resize(image_size)]
-        self.min_area = min_area
-        self.max_detections = max_detections
-
-        # Map original COCO category IDs to contiguous 1..N
-        cats = self.coco.loadCats(self.coco.getCatIds())
-        cats = sorted(cats, key=lambda x: x['id'])
-        self.cat_id_to_contiguous = {cat['id']: i+1 for i, cat in enumerate(cats)}
-        self.num_classes = len(cats) + 1  # +1 for background=0
-
-    def __len__(self):
-        return len(self.image_ids)
-
     def __getitem__(self, idx):
         img_id = self.image_ids[idx]
         info = self.coco.imgs[img_id]
         file_name = info['file_name']
         img_path = self.images_dir / file_name
-        if not img_path.exists():
-            raise FileNotFoundError(f"Image file not found: {img_path}")
         
         img = Image.open(img_path).convert("RGB")
         orig_w, orig_h = info['width'], info['height']
         
-        # Resize
-        for t in self.transforms:
-            img = t(img)
-        new_w, new_h = img.size  # PIL size: (width, height)
+        # FIXED: Letterbox resize that preserves aspect ratio
+        target_w, target_h = self.image_size  # (800, 1200)
         
-        # Convert to tensor - keep in 0-1 range for normalization
-        img_np = np.array(img).astype(np.float32) / 255.0
+        # Calculate scale to fit while preserving aspect ratio
+        scale = min(target_w / orig_w, target_h / orig_h)
+        
+        # Calculate new dimensions
+        new_w = int(orig_w * scale)
+        new_h = int(orig_h * scale)
+        
+        # Resize with aspect ratio preserved
+        img = img.resize((new_w, new_h), Image.LANCZOS)
+        
+        # Create letterboxed image
+        letterboxed_img = Image.new('RGB', (target_w, target_h), (114, 114, 114))
+        
+        # Calculate paste position (center the resized image)
+        paste_x = (target_w - new_w) // 2
+        paste_y = (target_h - new_h) // 2
+        
+        # Paste resized image onto letterboxed background
+        letterboxed_img.paste(img, (paste_x, paste_y))
+        
+        # Convert to tensor
+        img_np = np.array(letterboxed_img).astype(np.float32) / 255.0
         img_tensor = torch.from_numpy(img_np.transpose(2,0,1)).float()
 
-        # Load annotations for this image
+        # FIXED: Load and transform bounding boxes
         ann_ids = self.coco.getAnnIds(imgIds=img_id)
         anns = self.coco.loadAnns(ann_ids)
         boxes = []
         labels = []
+        
         for ann in anns:
-            x, y, w, h = ann['bbox']
-            area = w * h
-            if area < self.min_area:
-                continue
+            x, y, w, h = ann['bbox']  # COCO format: [x, y, width, height]
+            
+            # Convert to [x1, y1, x2, y2] format
             x1, y1 = x, y
             x2, y2 = x + w, y + h
-            # scale coords from original to resized
-            scale_x = new_w / orig_w
-            scale_y = new_h / orig_h
-            x1 *= scale_x; x2 *= scale_x
-            y1 *= scale_y; y2 *= scale_y
-            # clamp
-            x1 = max(0, x1); y1 = max(0, y1)
-            x2 = min(new_w, x2); y2 = min(new_h, y2)
-            if x2 <= x1 or y2 <= y1:
-                continue
-            boxes.append([x1, y1, x2, y2])
-            orig_cat = ann['category_id']
-            labels.append(self.cat_id_to_contiguous[orig_cat])
-            if self.max_detections and len(boxes) >= self.max_detections:
-                break
+            
+            # FIXED: Apply same scaling and offset as image
+            x1_new = x1 * scale + paste_x
+            y1_new = y1 * scale + paste_y
+            x2_new = x2 * scale + paste_x
+            y2_new = y2 * scale + paste_y
+            
+            # Clamp to image boundaries
+            x1_new = max(0, min(x1_new, target_w))
+            y1_new = max(0, min(y1_new, target_h))
+            x2_new = max(0, min(x2_new, target_w))
+            y2_new = max(0, min(y2_new, target_h))
+            
+            # Check if box is still valid
+            if x2_new > x1_new and y2_new > y1_new:
+                area = (x2_new - x1_new) * (y2_new - y1_new)
+                if area >= self.min_area:
+                    boxes.append([x1_new, y1_new, x2_new, y2_new])
+                    labels.append(self.cat_id_to_contiguous[ann['category_id']])
         
+        # Convert to tensors
         if boxes:
             box_tensor = torch.tensor(boxes, dtype=torch.float32)
             label_tensor = torch.tensor(labels, dtype=torch.long)
         else:
             box_tensor = torch.zeros((0,4), dtype=torch.float32)
             label_tensor = torch.zeros((0,), dtype=torch.long)
+        
         return img_tensor, label_tensor, box_tensor
-
-    def get_num_classes(self):
-        return self.num_classes
-
-    def get_class_names(self):
-        cats = self.coco.loadCats(self.coco.getCatIds())
-        cats = sorted(cats, key=lambda x: x['id'])
-        return ['__background__'] + [c['name'] for c in cats]
 
 
 def collate_fn(batch):
@@ -433,11 +394,11 @@ def train(train_dir: pathlib.Path, val_dir: pathlib.Path, writer, resume_ckpt_pa
         avg_cen_loss = np.mean(epoch_cen_losses)
         avg_reg_loss = np.mean(epoch_reg_losses)
         
-        logger.info(f"Epoch {epoch} completed:")
-        logger.info(f"  Avg Total Loss: {avg_loss:.4f}")
-        logger.info(f"  Avg Cls Loss: {avg_cls_loss:.4f}")
-        logger.info(f"  Avg Cen Loss: {avg_cen_loss:.4f}")
-        logger.info(f"  Avg Reg Loss: {avg_reg_loss:.4f}")
+        print(f"Epoch {epoch} completed:")
+        print(f"  Avg Total Loss: {avg_loss:.4f}")
+        print(f"  Avg Cls Loss: {avg_cls_loss:.4f}")
+        print(f"  Avg Cen Loss: {avg_cen_loss:.4f}")
+        print(f"  Avg Reg Loss: {avg_reg_loss:.4f}")
         
         # Validation phase
         if epoch % 5 == 0:  # Validate every 5 epochs
@@ -461,7 +422,7 @@ def train(train_dir: pathlib.Path, val_dir: pathlib.Path, writer, resume_ckpt_pa
                         img_with_dets = render_detections_to_image(img_vis.copy(), detections[0])
                         img_with_targets = _render_targets_to_image(img_vis.copy(), box_labels[0])
                         
-                        logger.info(f"Validation image 0: {len(detections[0])} detections, "
+                        print(f"Validation image 0: {len(detections[0])} detections, "
                                    f"{len(box_labels[0])} ground truth boxes")
 
         # Save checkpoint every 3 epochs

@@ -8,6 +8,160 @@ import matplotlib.pyplot as plt
 import os
 os.environ["KMP_DUPLICATE_LIB_OK"] = "TRUE"
 
+
+def simple_centerness_detection_fixed(model, image_tensor, min_centerness=0.6, max_detections=30):
+    """Fixed simple detection with proper coordinate handling"""
+    
+    with torch.no_grad():
+        batch_norm = normalize_batch(image_tensor)
+        cls_pred, cen_pred, box_pred = model(batch_norm)
+        
+        detections = []
+        H, W = image_tensor.shape[2], image_tensor.shape[3]
+        
+        print(f"Image size: {W}x{H}")
+        
+        # Check ALL levels, not just Level 1
+        strides = [4, 8, 16, 32, 64]
+        
+        for level_idx, (cent, stride) in enumerate(zip(cen_pred, strides)):
+            cent = cent[0]  # Remove batch dimension
+            feat_h, feat_w = cent.shape
+            
+            print(f"Level {level_idx}: feature map {feat_w}x{feat_h}, stride={stride}")
+            
+            # Find high centerness locations across ENTIRE feature map
+            high_mask = cent > min_centerness
+            y_coords, x_coords = torch.where(high_mask)
+            
+            print(f"  High centerness locations: {len(y_coords)}")
+            if len(y_coords) > 0:
+                # Show distribution of x-coordinates
+                x_vals = x_coords.cpu().numpy()
+                print(f"  X-coordinate range: {x_vals.min()}-{x_vals.max()} (feature map width: {feat_w})")
+                
+                # FIXED: Sample from entire feature map, not just edges
+                for i in range(min(10, len(y_coords))):
+                    feat_y, feat_x = y_coords[i].item(), x_coords[i].item()
+                    score = cent[feat_y, feat_x].item()
+                    
+                    # PROPER coordinate transformation
+                    img_x = feat_x * stride + stride // 2  # Center of the grid cell
+                    img_y = feat_y * stride + stride // 2
+                    
+                    # Ensure coordinates are within image bounds
+                    if img_x >= W or img_y >= H:
+                        continue
+                        
+                    print(f"    Feat({feat_x}, {feat_y}) -> Img({img_x}, {img_y}), score={score:.3f}")
+                    
+                    # Fixed box size for Braille characters
+                    box_size = min(40, stride * 2)  # Reasonable size
+                    
+                    x1 = max(0, img_x - box_size//2)
+                    y1 = max(0, img_y - box_size//2)
+                    x2 = min(W, img_x + box_size//2)
+                    y2 = min(H, img_y + box_size//2)
+                    
+                    detections.append({
+                        'class': f'L{level_idx}',
+                        'score': score,
+                        'bbox': [x1, y1, x2, y2],
+                        'level': level_idx
+                    })
+        
+        # Sort by score and return top detections
+        detections.sort(key=lambda x: x['score'], reverse=True)
+        return detections[:max_detections]
+
+def debug_centerness_distribution(model, image_tensor):
+    """Debug where the model thinks objects are"""
+    
+    with torch.no_grad():
+        batch_norm = normalize_batch(image_tensor)
+        cls_pred, cen_pred, box_pred = model(batch_norm)
+        
+        strides = [4, 8, 16, 32, 64]
+        
+        print("=== CENTERNESS DISTRIBUTION ANALYSIS ===")
+        
+        for level_idx, (cent, stride) in enumerate(zip(cen_pred, strides)):
+            cent = cent[0]  # Remove batch dimension
+            feat_h, feat_w = cent.shape
+            
+            # Analyze centerness distribution
+            cent_np = cent.cpu().numpy()
+            
+            print(f"\nLevel {level_idx} (stride {stride}):")
+            print(f"  Feature map: {feat_w}x{feat_h}")
+            print(f"  Centerness range: {cent_np.min():.3f} to {cent_np.max():.3f}")
+            print(f"  Mean centerness: {cent_np.mean():.3f}")
+            
+            # Check distribution across x-axis
+            x_means = cent_np.mean(axis=0)  # Average across height
+            print(f"  X-axis distribution (first 10): {x_means[:10]}")
+            print(f"  X-axis distribution (last 10): {x_means[-10:]}")
+            
+            # Find peak locations
+            high_locs = np.where(cent_np > 0.7)
+            if len(high_locs[0]) > 0:
+                x_peaks = high_locs[1]
+                y_peaks = high_locs[0]
+                print(f"  High centerness X-coordinates: {np.unique(x_peaks)}")
+                print(f"  High centerness Y-coordinates: {np.unique(y_peaks)}")
+
+def render_centerness_detections(image, detections):
+    """Render detections with centerness info"""
+    import cv2
+    import numpy as np
+    
+    if isinstance(image, torch.Tensor):
+        # Convert tensor to numpy
+        img = image.cpu().numpy().transpose(1, 2, 0)
+        img = (img * 255).clip(0, 255).astype(np.uint8)
+    else:
+        img = image.copy()
+    
+    # Color for each level
+    level_colors = [
+        (255, 0, 0),    # Level 0: Red
+        (0, 255, 0),    # Level 1: Green  
+        (0, 0, 255),    # Level 2: Blue
+        (255, 255, 0),  # Level 3: Yellow
+        (255, 0, 255),  # Level 4: Magenta
+    ]
+    
+    for i, det in enumerate(detections):
+        x1, y1, x2, y2 = [int(coord) for coord in det['bbox']]
+        score = det['score']
+        level = det.get('level', 0)
+        
+        # Get color for this level
+        color = level_colors[level % len(level_colors)]
+        
+        # Draw bounding box
+        cv2.rectangle(img, (x1, y1), (x2, y2), color, 2)
+        
+        # Draw level and score
+        label = f"L{level}: {score:.3f}"
+        label_size, _ = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, 0.5, 1)
+        
+        # Background for text
+        cv2.rectangle(img, (x1, y1 - label_size[1] - 5), 
+                     (x1 + label_size[0], y1), color, -1)
+        
+        # Text
+        cv2.putText(img, label, (x1, y1 - 5), 
+                   cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
+    
+    return img
+
+def tensor_to_image(tensor):
+    """Convert tensor to numpy array for visualization"""
+    img = tensor.cpu().numpy().transpose(1, 2, 0)
+    img = (img * 255).clip(0, 255).astype(np.uint8)
+    return img
+
 # 1. Load model
 num_classes = 28
 model = FPN(num_classes=num_classes)
@@ -16,7 +170,7 @@ model.load_state_dict(ckpt["model_state"])
 model.eval()
 
 # 2. Load and preprocess image
-img_path = "B38.jpg"
+img_path = "before2.jpg"
 img_bgr = cv2.imread(img_path)
 img_rgb = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2RGB)
 print(f"Original image shape: {img_rgb.shape}")
@@ -62,47 +216,36 @@ with torch.no_grad():
 H, W = input_tensor.shape[2], input_tensor.shape[3]  # H=1200, W=800
 print(f"\nUsing image dimensions: H={H}, W={W}")
 
-print("\n" + "="*50)
-print("CALLING DEBUG DETECTION FUNCTION")
-print("="*50)
+# Add this to your test.py after loading the model
 
-# Use correct dimensions for detection
-gathered_boxes, gathered_classes, gathered_scores = debug_detections_from_network_output(
-    H, W, classes, centerness, boxes, model.scales, model.strides
+print("=== CENTERNESS-BASED DETECTION ===")
+print("=" * 50)
+
+# First, debug the distribution
+debug_centerness_distribution(model, input_tensor)
+
+# Then try fixed detection
+print("\n=== FIXED DETECTION ===")
+fixed_detections = simple_centerness_detection_fixed(
+    model, input_tensor, 
+    min_centerness=0.7,
+    max_detections=30
 )
 
-# Convert to Detection objects
-from inference import detections_from_net
-detections_list = detections_from_net(gathered_boxes, gathered_classes, gathered_scores)
-detections = detections_list[0]  # batch size = 1
+print(f"Fixed detections: {len(fixed_detections)}")
 
-print(f"\nFinal detections: {len(detections)}")
-if len(detections) > 0:
-    for i, det in enumerate(detections):
-        x1, y1, x2, y2 = det.bbox
-        width = x2 - x1
-        height = y2 - y1
-        aspect_ratio = width / height if height > 0 else 0
-        print(f"Detection {i}: class={det.object_class}, score={det.score:.4f}")
-        print(f"  bbox=[{x1:.0f},{y1:.0f},{x2:.0f},{y2:.0f}], size={width:.0f}x{height:.0f}, aspect={aspect_ratio:.2f}")
-
-# 5. Visualize
-vis = tensor_to_image(input_tensor[0])
-vis = render_detections_to_image(vis, detections)
-
-# CHANGED: Adjust figure size for 800x1200 aspect ratio
-plt.figure(figsize=(8, 12))  # Maintain aspect ratio
-plt.imshow(vis)
-plt.title(f"Detections: {len(detections)} (800x1200)")
-plt.axis('off')
-plt.show()
-
-# 6. Save debug image
-cv2.imwrite("debug_output.jpg", cv2.cvtColor(vis, cv2.COLOR_RGB2BGR))
-print("Debug output saved as 'debug_output.jpg'")
-
-# Check if model was actually trained
-print("\n=== MODEL WEIGHT ANALYSIS ===")
-for name, param in model.named_parameters():
-    if 'classification_to_class' in name or 'classification_to_centerness' in name:
-        print(f"{name}: mean={param.data.mean():.4f}, std={param.data.std():.4f}")
+# Show detection distribution
+if len(fixed_detections) > 0:
+    x_coords = [det['bbox'][0] for det in fixed_detections]
+    y_coords = [det['bbox'][1] for det in fixed_detections]
+    print(f"Detection X-coordinates: {min(x_coords):.0f} to {max(x_coords):.0f}")
+    print(f"Detection Y-coordinates: {min(y_coords):.0f} to {max(y_coords):.0f}")
+    
+    # Visualize
+    vis_fixed = render_centerness_detections(input_tensor[0], fixed_detections)
+    cv2.imwrite("fixed_detections.jpg", cv2.cvtColor(vis_fixed, cv2.COLOR_RGB2BGR))
+    print("Saved fixed detections as 'fixed_detections.jpg'")
+else:
+    print("No detections found - trying lower threshold...")
+    low_thresh = simple_centerness_detection_fixed(model, input_tensor, min_centerness=0.5)
+    print(f"With threshold 0.5: {len(low_thresh)} detections")

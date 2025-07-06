@@ -3,28 +3,25 @@ import torch
 import math
 
 def generate_targets(img_shape, class_labels_by_batch, box_labels_by_batch, strides):
-    """Optimized target generation with progress logging"""
-    
-    print(f"🎯 Starting target generation for {len(class_labels_by_batch)} images")
+    """Fixed target generation with proper coordinate handling"""
     
     batch_size = img_shape[0]
     img_h, img_w = img_shape[2], img_shape[3]
     
+    print(f"Target generation: img_size=({img_w}, {img_h})")
     
-    # Fixed size ranges for your strides
-    if len(strides) == 5:
-        m = (0, 20, 40, 60, 120, 320, math.inf)
-    else:
-        m = (0, 20, 40, 80, math.inf)
+    # Size ranges for target assignment
+    m = (0, 20, 40, 80, 160, 320, math.inf)
     
     class_targets_by_feature = []
     centerness_target_by_feature = []
     box_targets_by_feature = []
     
     for i, stride in enumerate(strides):
-        
         feat_h = img_h // stride
         feat_w = img_w // stride
+        
+        print(f"Level {i}: stride={stride}, feat_size=({feat_w}, {feat_h})")
         
         # Initialize targets
         class_target_for_feature = torch.zeros(batch_size, feat_h, feat_w, dtype=torch.long)
@@ -40,48 +37,54 @@ def generate_targets(img_shape, class_labels_by_batch, box_labels_by_batch, stri
             if len(box_labels) == 0:
                 continue
             
-            # OPTIMIZED: Vectorized computation
-            heights = box_labels[:, 3] - box_labels[:, 1]
-            widths = box_labels[:, 2] - box_labels[:, 0]
-            max_sides = torch.maximum(heights, widths)
-            
-            # Filter valid boxes
-            valid_mask = (max_sides >= min_box_side) & (max_sides < max_box_side)
-            valid_indices = torch.where(valid_mask)[0]
-            
-            if len(valid_indices) == 0:
-                continue
-            
-            # Process only valid boxes (much faster)
-            for j in valid_indices:
+            for j in range(len(box_labels)):
                 box = box_labels[j]
                 class_id = class_labels[j]
                 
-                # Convert to grid coordinates
                 x1, y1, x2, y2 = box
-                center_x = (x1 + x2) / 2 / stride
-                center_y = (y1 + y2) / 2 / stride
                 
-                if 0 <= center_x < feat_w and 0 <= center_y < feat_h:
-                    grid_x, grid_y = int(center_x), int(center_y)
+                # FIXED: Proper center calculation
+                center_x = (x1 + x2) / 2
+                center_y = (y1 + y2) / 2
+                width = x2 - x1
+                height = y2 - y1
+                max_side = max(width, height)
+                
+                # Size filtering
+                if max_side < min_box_side or max_side >= max_box_side:
+                    continue
+                
+                # FIXED: Convert to feature map coordinates
+                feat_center_x = center_x / stride
+                feat_center_y = center_y / stride
+                
+                # Check bounds
+                if 0 <= feat_center_x < feat_w and 0 <= feat_center_y < feat_h:
+                    grid_x = int(feat_center_x)
+                    grid_y = int(feat_center_y)
                     
-                    # Quick assignment
+                    # Assign target
                     class_target_for_feature[batch_idx, grid_y, grid_x] = class_id
                     positive_count += 1
                     
-                    # Basic centerness (simplified)
-                    left = center_x - x1 / stride
-                    top = center_y - y1 / stride
-                    right = x2 / stride - center_x
-                    bottom = y2 / stride - center_y
+                    # Calculate regression targets (distances from center to edges)
+                    left = feat_center_x - x1 / stride
+                    top = feat_center_y - y1 / stride
+                    right = x2 / stride - feat_center_x
+                    bottom = y2 / stride - feat_center_y
                     
+                    # Calculate centerness
                     if left > 0 and top > 0 and right > 0 and bottom > 0:
-                        centerness = 0.8  # Simplified centerness
+                        centerness = math.sqrt(
+                            (min(left, right) / max(left, right)) *
+                            (min(top, bottom) / max(top, bottom))
+                        )
                         centerness_target_for_feature[batch_idx, grid_y, grid_x] = centerness
                         box_target_for_feature[batch_idx, grid_y, grid_x] = torch.tensor([
                             left, top, right, bottom
                         ])
         
+        print(f"Level {i}: {positive_count} positive samples")
         
         class_targets_by_feature.append(class_target_for_feature)
         centerness_target_by_feature.append(centerness_target_for_feature)
