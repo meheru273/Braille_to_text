@@ -175,11 +175,8 @@ def _compute_loss(
         cls_t = class_targets[idx].to(device)  # [B, H_target, W_target]
         cen_t = centerness_targets[idx].to(device)  # [B, H_target, W_target]
         box_t = box_targets[idx].to(device)  # [B, H_target, W_target, 4]
-        
-        # print(f"Level {idx}:")
-        # print(f"  Model output: cls={cls_p.shape}, cen={cen_p.shape}, box={box_p.shape}")
-        # print(f"  Targets: cls={cls_t.shape}, cen={cen_t.shape}, box={box_t.shape}")
-        
+    
+    
         # FIXED: Resize targets to match model output if shapes don't match
         B, H_pred, W_pred = cls_p.shape[:3]
         B_t, H_target, W_target = cls_t.shape
@@ -364,13 +361,6 @@ def train(train_dir: pathlib.Path, val_dir: pathlib.Path, writer, resume_ckpt_pa
             start_epoch = checkpoint['epoch'] + 1
             
             print(f"Will start training from epoch {start_epoch}")
-            
-            # # Print previous training losses if available
-            # if 'losses' in checkpoint:
-            #     prev_losses = checkpoint['losses']
-            #     # print("Previous training losses:")
-            #     for loss_name, loss_value in prev_losses.items():
-            #         print(f"  {loss_name}: {loss_value:.4f}")
                     
         except Exception as e:
             print("Starting training from scratch...")
