@@ -365,12 +365,12 @@ def train(train_dir: pathlib.Path, val_dir: pathlib.Path, writer, resume_ckpt_pa
             
             print(f"Will start training from epoch {start_epoch}")
             
-            # Print previous training losses if available
-            if 'losses' in checkpoint:
-                prev_losses = checkpoint['losses']
-                # print("Previous training losses:")
-                for loss_name, loss_value in prev_losses.items():
-                    print(f"  {loss_name}: {loss_value:.4f}")
+            # # Print previous training losses if available
+            # if 'losses' in checkpoint:
+            #     prev_losses = checkpoint['losses']
+            #     # print("Previous training losses:")
+            #     for loss_name, loss_value in prev_losses.items():
+            #         print(f"  {loss_name}: {loss_value:.4f}")
                     
         except Exception as e:
             print("Starting training from scratch...")
@@ -433,10 +433,6 @@ def train(train_dir: pathlib.Path, val_dir: pathlib.Path, writer, resume_ckpt_pa
             epoch_cen_losses.append(cen_loss.item())
             epoch_reg_losses.append(reg_loss.item())
             
-            if batch_idx % 2 == 0:
-                logger.info(f"Epoch {epoch}, batch {batch_idx}/{len(train_loader)}")
-                logger.info(f"  Total: {total_loss.item():.4f}, Cls: {cls_loss.item():.4f}, "
-                           f"Cen: {cen_loss.item():.4f}, Reg: {reg_loss.item():.4f}")
         
         # Update learning rate
         scheduler.step()
@@ -447,11 +443,11 @@ def train(train_dir: pathlib.Path, val_dir: pathlib.Path, writer, resume_ckpt_pa
         avg_cen_loss = np.mean(epoch_cen_losses)
         avg_reg_loss = np.mean(epoch_reg_losses)
         
-        # logger.info(f"Epoch {epoch} completed:")
-        # logger.info(f"  Avg Total Loss: {avg_loss:.4f}")
-        # logger.info(f"  Avg Cls Loss: {avg_cls_loss:.4f}")
-        # logger.info(f"  Avg Cen Loss: {avg_cen_loss:.4f}")
-        # logger.info(f"  Avg Reg Loss: {avg_reg_loss:.4f}")
+        logger.info(f"Epoch {epoch} completed:")
+        logger.info(f"  Avg Total Loss: {avg_loss:.4f}")
+        logger.info(f"  Avg Cls Loss: {avg_cls_loss:.4f}")
+        logger.info(f"  Avg Cen Loss: {avg_cen_loss:.4f}")
+        logger.info(f"  Avg Reg Loss: {avg_reg_loss:.4f}")
         
         # Validation phase
         if epoch % 5 == 0:  # Validate every 5 epochs
