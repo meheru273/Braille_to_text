@@ -176,9 +176,9 @@ def _compute_loss(
         cen_t = centerness_targets[idx].to(device)  # [B, H_target, W_target]
         box_t = box_targets[idx].to(device)  # [B, H_target, W_target, 4]
         
-        print(f"Level {idx}:")
-        print(f"  Model output: cls={cls_p.shape}, cen={cen_p.shape}, box={box_p.shape}")
-        print(f"  Targets: cls={cls_t.shape}, cen={cen_t.shape}, box={box_t.shape}")
+        # print(f"Level {idx}:")
+        # print(f"  Model output: cls={cls_p.shape}, cen={cen_p.shape}, box={box_p.shape}")
+        # print(f"  Targets: cls={cls_t.shape}, cen={cen_t.shape}, box={box_t.shape}")
         
         # FIXED: Resize targets to match model output if shapes don't match
         B, H_pred, W_pred = cls_p.shape[:3]
@@ -231,7 +231,7 @@ def _compute_loss(
             reg_loss = box_loss_fn(box_p_flat[pos_mask], box_t_flat[pos_mask]).mean()
             regression_losses.append(reg_loss)
         
-        print(f"  Positive samples: {pos_mask.sum()}")
+        # print(f"  Positive samples: {pos_mask.sum()}")
     
     # Compute total loss
     total_cls_loss = torch.stack(classification_losses).mean() if classification_losses else torch.tensor(0.0, device=device)
@@ -368,7 +368,7 @@ def train(train_dir: pathlib.Path, val_dir: pathlib.Path, writer, resume_ckpt_pa
             # Print previous training losses if available
             if 'losses' in checkpoint:
                 prev_losses = checkpoint['losses']
-                print("Previous training losses:")
+                # print("Previous training losses:")
                 for loss_name, loss_value in prev_losses.items():
                     print(f"  {loss_name}: {loss_value:.4f}")
                     
@@ -447,11 +447,11 @@ def train(train_dir: pathlib.Path, val_dir: pathlib.Path, writer, resume_ckpt_pa
         avg_cen_loss = np.mean(epoch_cen_losses)
         avg_reg_loss = np.mean(epoch_reg_losses)
         
-        logger.info(f"Epoch {epoch} completed:")
-        logger.info(f"  Avg Total Loss: {avg_loss:.4f}")
-        logger.info(f"  Avg Cls Loss: {avg_cls_loss:.4f}")
-        logger.info(f"  Avg Cen Loss: {avg_cen_loss:.4f}")
-        logger.info(f"  Avg Reg Loss: {avg_reg_loss:.4f}")
+        # logger.info(f"Epoch {epoch} completed:")
+        # logger.info(f"  Avg Total Loss: {avg_loss:.4f}")
+        # logger.info(f"  Avg Cls Loss: {avg_cls_loss:.4f}")
+        # logger.info(f"  Avg Cen Loss: {avg_cen_loss:.4f}")
+        # logger.info(f"  Avg Reg Loss: {avg_reg_loss:.4f}")
         
         # Validation phase
         if epoch % 5 == 0:  # Validate every 5 epochs

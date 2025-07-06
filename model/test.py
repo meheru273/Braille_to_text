@@ -16,7 +16,7 @@ model.load_state_dict(ckpt["model_state"])
 model.eval()
 
 # 2. Load and preprocess image
-img_path = "before2.jpg"
+img_path = "B38.jpg"
 img_bgr = cv2.imread(img_path)
 img_rgb = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2RGB)
 print(f"Original image shape: {img_rgb.shape}")
