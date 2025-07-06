@@ -115,9 +115,13 @@ class COCOData(Dataset):
         cats = sorted(cats, key=lambda x: x['id'])
         return ['__background__'] + [c['name'] for c in cats]
 
+
+
+
 def collate_fn(batch):
     imgs, lbls, bxs = zip(*batch)
     return torch.stack(imgs), list(lbls), list(bxs)
+
 
 
 def tensor_to_image(tensor):
@@ -308,6 +312,30 @@ def train(train_dir: pathlib.Path, val_dir: pathlib.Path, writer, resume_ckpt_pa
     val_loader = DataLoader(val_dataset, batch_size=1, shuffle=False,
                             num_workers=2, collate_fn=collate_fn)
 
+
+    def verify_ground_truth():
+        for batch_idx, (x, class_labels, box_labels) in enumerate(train_loader):
+            if batch_idx >= 3:
+                break
+                
+            print(f"\nBatch {batch_idx}:")
+            for i, (labels, boxes) in enumerate(zip(class_labels, box_labels)):
+                print(f"  Sample {i}: {len(labels)} objects")
+                if len(boxes) > 0:
+                    print(f"    Classes: {labels}")
+                    print(f"    Box example: {boxes[0]} (should be [x1,y1,x2,y2])")
+                    
+                    # Check if boxes are reasonable for 800x1200 image
+                    for j, box in enumerate(boxes[:3]):  # Check first 3
+                        x1, y1, x2, y2 = box
+                        w, h = x2-x1, y2-y1
+                        print(f"    Box {j}: size={w:.1f}x{h:.1f}, center=({(x1+x2)/2:.1f},{(y1+y2)/2:.1f})")
+                        
+                        if x1 < 0 or y1 < 0 or x2 > 800 or y2 > 1200:
+                            print(f"      ERROR: Box outside image bounds!")
+                        if w < 5 or h < 5:
+                            print(f"      WARNING: Very small box")
+    verify_ground_truth()
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     logger.info(f"Using device: {device}")
 
@@ -375,10 +403,18 @@ def train(train_dir: pathlib.Path, val_dir: pathlib.Path, writer, resume_ckpt_pa
             cls_pred, cen_pred, box_pred = model(batch_norm)
             
             # Generate targets
-            debug_enabled = (epoch == 1 and batch_idx < 3)  # Debug first 3 batches of first epoch
             class_targets, centerness_targets, box_targets = generate_targets(
-                x.shape, class_labels, box_labels, model.strides, debug=debug_enabled
+            torch.tensor(x.shape), class_labels, box_labels, model.strides
             )
+            
+            total_pos = sum((target > 0).sum().item() for target in class_targets)
+            total_locations = sum(target.numel() for target in class_targets)
+            pos_ratio = total_pos / total_locations
+
+            print(f"Positive ratio: {pos_ratio:.4f}")
+            if pos_ratio > 0.1:  # More than 10%
+                print("ERROR: Too many positive targets - check target generation!")
+                continue 
             
             total_loss, cls_loss, cen_loss, reg_loss = _compute_loss(
                 cls_pred, cen_pred, box_pred,
