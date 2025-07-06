@@ -8,7 +8,6 @@ def generate_targets(img_shape, class_labels_by_batch, box_labels_by_batch, stri
     batch_size = img_shape[0]
     img_h, img_w = img_shape[2], img_shape[3]
     
-    print(f"Target generation: img_size=({img_w}, {img_h})")
     
     # Size ranges for target assignment
     m = (0, 20, 40, 80, 160, 320, math.inf)
@@ -21,7 +20,6 @@ def generate_targets(img_shape, class_labels_by_batch, box_labels_by_batch, stri
         feat_h = img_h // stride
         feat_w = img_w // stride
         
-        print(f"Level {i}: stride={stride}, feat_size=({feat_w}, {feat_h})")
         
         # Initialize targets
         class_target_for_feature = torch.zeros(batch_size, feat_h, feat_w, dtype=torch.long)
@@ -84,7 +82,6 @@ def generate_targets(img_shape, class_labels_by_batch, box_labels_by_batch, stri
                             left, top, right, bottom
                         ])
         
-        print(f"Level {i}: {positive_count} positive samples")
         
         class_targets_by_feature.append(class_target_for_feature)
         centerness_target_by_feature.append(centerness_target_for_feature)

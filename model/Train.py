@@ -19,18 +19,69 @@ from Targets import generate_targets
 logger = logging.getLogger(__name__)
 
 
+import pathlib
+import torch
+from torch.utils.data import Dataset
+import numpy as np
+from PIL import Image
+from pycocotools.coco import COCO
+
 class COCOData(Dataset):
+    """
+    Enhanced COCO dataset with proper preprocessing for Braille detection
+    """
+    def __init__(self, split_dir: pathlib.Path, image_size=(800, 1200), min_area=16, max_detections=None):
+        self.split_dir = pathlib.Path(split_dir)
+        if not self.split_dir.exists():
+            raise FileNotFoundError(f"Folder not found: {self.split_dir}")
+        
+        # Find the JSON annotation file in split_dir
+        jsons = list(self.split_dir.glob("*.json"))
+        if not jsons:
+            raise FileNotFoundError(f"No JSON annotation file in {self.split_dir}")
+        
+        ann_file = None
+        for jf in jsons:
+            if "annotation" in jf.name.lower():
+                ann_file = jf
+                break
+        if ann_file is None:
+            ann_file = jsons[0]
+        
+        print(f"Loading COCO annotations from: {ann_file}")
+        self.coco = COCO(str(ann_file))
+
+        # Images are directly in split_dir
+        self.images_dir = self.split_dir
+        self.image_ids = list(self.coco.imgs.keys())
+
+        self.image_size = image_size
+        self.min_area = min_area
+        self.max_detections = max_detections
+
+        # Map original COCO category IDs to contiguous 1..N
+        cats = self.coco.loadCats(self.coco.getCatIds())
+        cats = sorted(cats, key=lambda x: x['id'])
+        self.cat_id_to_contiguous = {cat['id']: i+1 for i, cat in enumerate(cats)}
+        self.num_classes = len(cats) + 1  # +1 for background=0
+
+    def __len__(self):
+        return len(self.image_ids)
+
     def __getitem__(self, idx):
         img_id = self.image_ids[idx]
         info = self.coco.imgs[img_id]
         file_name = info['file_name']
         img_path = self.images_dir / file_name
         
+        if not img_path.exists():
+            raise FileNotFoundError(f"Image file not found: {img_path}")
+        
         img = Image.open(img_path).convert("RGB")
         orig_w, orig_h = info['width'], info['height']
         
-        # FIXED: Letterbox resize that preserves aspect ratio
-        target_w, target_h = self.image_size  # (800, 1200)
+        # FIXED: Proper letterbox resize to preserve aspect ratio
+        target_w, target_h = self.image_size
         
         # Calculate scale to fit while preserving aspect ratio
         scale = min(target_w / orig_w, target_h / orig_h)
@@ -40,7 +91,7 @@ class COCOData(Dataset):
         new_h = int(orig_h * scale)
         
         # Resize with aspect ratio preserved
-        img = img.resize((new_w, new_h), Image.LANCZOS)
+        img_resized = img.resize((new_w, new_h), Image.LANCZOS)
         
         # Create letterboxed image
         letterboxed_img = Image.new('RGB', (target_w, target_h), (114, 114, 114))
@@ -50,13 +101,13 @@ class COCOData(Dataset):
         paste_y = (target_h - new_h) // 2
         
         # Paste resized image onto letterboxed background
-        letterboxed_img.paste(img, (paste_x, paste_y))
+        letterboxed_img.paste(img_resized, (paste_x, paste_y))
         
-        # Convert to tensor
+        # Convert to tensor - keep in 0-1 range for normalization
         img_np = np.array(letterboxed_img).astype(np.float32) / 255.0
         img_tensor = torch.from_numpy(img_np.transpose(2,0,1)).float()
 
-        # FIXED: Load and transform bounding boxes
+        # FIXED: Load and transform bounding boxes with proper coordinates
         ann_ids = self.coco.getAnnIds(imgIds=img_id)
         anns = self.coco.loadAnns(ann_ids)
         boxes = []
@@ -64,7 +115,10 @@ class COCOData(Dataset):
         
         for ann in anns:
             x, y, w, h = ann['bbox']  # COCO format: [x, y, width, height]
-            
+            area = w * h
+            if area < self.min_area:
+                continue
+                
             # Convert to [x1, y1, x2, y2] format
             x1, y1 = x, y
             x2, y2 = x + w, y + h
@@ -81,22 +135,34 @@ class COCOData(Dataset):
             x2_new = max(0, min(x2_new, target_w))
             y2_new = max(0, min(y2_new, target_h))
             
-            # Check if box is still valid
+            # Check if box is still valid after transformation
             if x2_new > x1_new and y2_new > y1_new:
-                area = (x2_new - x1_new) * (y2_new - y1_new)
-                if area >= self.min_area:
+                final_area = (x2_new - x1_new) * (y2_new - y1_new)
+                if final_area >= self.min_area:
                     boxes.append([x1_new, y1_new, x2_new, y2_new])
-                    labels.append(self.cat_id_to_contiguous[ann['category_id']])
+                    orig_cat = ann['category_id']
+                    labels.append(self.cat_id_to_contiguous[orig_cat])
+                    
+                    if self.max_detections and len(boxes) >= self.max_detections:
+                        break
         
-        # Convert to tensors
         if boxes:
             box_tensor = torch.tensor(boxes, dtype=torch.float32)
             label_tensor = torch.tensor(labels, dtype=torch.long)
         else:
             box_tensor = torch.zeros((0,4), dtype=torch.float32)
             label_tensor = torch.zeros((0,), dtype=torch.long)
-        
+            
         return img_tensor, label_tensor, box_tensor
+
+    def get_num_classes(self):
+        return self.num_classes
+
+    def get_class_names(self):
+        cats = self.coco.loadCats(self.coco.getCatIds())
+        cats = sorted(cats, key=lambda x: x['id'])
+        return ['__background__'] + [c['name'] for c in cats]
+
 
 
 def collate_fn(batch):
