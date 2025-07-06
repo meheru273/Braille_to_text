@@ -54,62 +54,8 @@ def debug_generated_targets(class_targets_by_feature, centerness_target_by_featu
             print(f"  [OK] Positive ratio looks good ({positive_ratio:.1%})")  # Changed from ✓
 
 
-def debug_generated_targets(class_targets_by_feature, centerness_target_by_feature, box_targets_by_feature, strides):
-    """Debug the generated targets"""
-    print("\n=== GENERATED TARGETS ANALYSIS ===")
-    
-    for level_idx in range(len(class_targets_by_feature)):
-        cls_target = class_targets_by_feature[level_idx][0]  # First batch
-        cen_target = centerness_target_by_feature[level_idx][0]
-        box_target = box_targets_by_feature[level_idx][0]
-        
-        stride = strides[level_idx]
-        
-        print(f"\nLevel {level_idx} (stride {stride}):")
-        print(f"  Feature map shape: {cls_target.shape}")
-        print(f"  Unique classes: {torch.unique(cls_target)}")
-        
-        # Count positive samples
-        positive_mask = cls_target > 0
-        positive_count = positive_mask.sum().item()
-        total_locations = cls_target.numel()
-        positive_ratio = positive_count / total_locations
-        
-        print(f"  Positive samples: {positive_count}/{total_locations} ({positive_ratio:.4f})")
-        
-        if positive_count > 0:
-            # Show where positive samples are
-            pos_y, pos_x = torch.where(positive_mask)
-            print(f"  Positive locations Y: {pos_y.min().item()}-{pos_y.max().item()}")
-            print(f"  Positive locations X: {pos_x.min().item()}-{pos_x.max().item()}")
-            
-            # Show centerness stats for positive samples
-            pos_centerness = cen_target[positive_mask]
-            print(f"  Centerness range: {pos_centerness.min():.3f} to {pos_centerness.max():.3f}")
-            print(f"  Mean centerness: {pos_centerness.mean():.3f}")
-            
-            # Show some example positive samples
-            print(f"  Example positive samples:")
-            for i in range(min(3, len(pos_y))):
-                y, x = pos_y[i].item(), pos_x[i].item()
-                cls = cls_target[y, x].item()
-                cent = cen_target[y, x].item()
-                box = box_target[y, x]
-                print(f"    ({x}, {y}): class={cls}, cent={cent:.3f}, box=[{box[0]:.1f}, {box[1]:.1f}, {box[2]:.1f}, {box[3]:.1f}]")
-        
-        # Check for potential issues
-        if positive_ratio > 0.1:  # More than 10%
-            print(f"  WARNING: Too many positive samples ({positive_ratio:.1%})")
-        elif positive_ratio < 0.001:  # Less than 0.1%
-            print(f"  WARNING: Very few positive samples ({positive_ratio:.1%})")
-        else:
-            print(f"  ✓ Positive ratio looks good ({positive_ratio:.1%})")
-
 def generate_targets(img_shape, class_labels_by_batch, box_labels_by_batch, strides, debug=False):
     """Fixed target generation with proper coordinate handling"""
-    
-    if debug:
-        debug_target_generation(class_labels_by_batch, box_labels_by_batch, img_shape, strides)
     
     batch_size = img_shape[0]
     img_h, img_w = img_shape[2], img_shape[3]
@@ -218,9 +164,6 @@ def generate_targets(img_shape, class_labels_by_batch, box_labels_by_batch, stri
                             positive_count -= 1
                             if debug:
                                 print(f"    Invalid distances for box {j}: l={left:.2f}, t={top:.2f}, r={right:.2f}, b={bottom:.2f}")
-        
-        if debug:
-            print(f"  Level {i} assigned {positive_count} positive samples")
         
         total_positive_assigned += positive_count
         
