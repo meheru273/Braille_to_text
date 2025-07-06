@@ -433,7 +433,7 @@ def train(train_dir: pathlib.Path, val_dir: pathlib.Path, writer, resume_ckpt_pa
             epoch_cen_losses.append(cen_loss.item())
             epoch_reg_losses.append(reg_loss.item())
             
-            if batch_idx % 10 == 0:
+            if batch_idx % 2 == 0:
                 logger.info(f"Epoch {epoch}, batch {batch_idx}/{len(train_loader)}")
                 logger.info(f"  Total: {total_loss.item():.4f}, Cls: {cls_loss.item():.4f}, "
                            f"Cen: {cen_loss.item():.4f}, Reg: {reg_loss.item():.4f}")
