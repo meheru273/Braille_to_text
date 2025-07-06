@@ -10,7 +10,6 @@ def generate_targets(img_shape, class_labels_by_batch, box_labels_by_batch, stri
     batch_size = img_shape[0]
     img_h, img_w = img_shape[2], img_shape[3]
     
-    print(f"Image shape: {img_h}×{img_w}, Strides: {strides}")
     
     # Fixed size ranges for your strides
     if len(strides) == 5:
@@ -23,7 +22,6 @@ def generate_targets(img_shape, class_labels_by_batch, box_labels_by_batch, stri
     box_targets_by_feature = []
     
     for i, stride in enumerate(strides):
-        print(f"Processing level {i}, stride {stride}")
         
         feat_h = img_h // stride
         feat_w = img_w // stride
@@ -89,5 +87,4 @@ def generate_targets(img_shape, class_labels_by_batch, box_labels_by_batch, stri
         centerness_target_by_feature.append(centerness_target_for_feature)
         box_targets_by_feature.append(box_target_for_feature)
     
-    print("🎯 Target generation complete")
     return class_targets_by_feature, centerness_target_by_feature, box_targets_by_feature
