@@ -9,7 +9,7 @@ import torchvision
 
 from FPN import FPN, normalize_batch
 
-MIN_SCORE = 0.01
+MIN_SCORE = 0.001
 DEFAULT_MAX_DETECTIONS = 3000
 
 
@@ -63,9 +63,6 @@ def compute_detections(model: FPN, img: np.ndarray, device) -> List[Detection]:
     )
     # returns List[List[Detection]]; since batch size=1, you can return detections[0]
     return detections[0]
-
-
-
 
 
 def detections_from_network_output(
@@ -252,16 +249,7 @@ def _gather_detections(classes, centernesses, boxes, max_detections=DEFAULT_MAX_
     return boxes_by_batch, classes_by_batch, scores_by_batch
 
 def tensor_to_image(tensor: torch.Tensor) -> np.ndarray:
-    """
-    Convert a torch tensor [C,H,W] in [0,1] or [0,255] to uint8 HWC image
     
-    Args:
-        tensor: PyTorch tensor of shape [C, H, W] where C is channels (usually 3)
-        
-    Returns:
-        numpy array of shape [H, W, C] with dtype uint8, values in [0, 255]
-    """
-    # Detach from computation graph and move to CPU
     arr = tensor.detach().cpu().numpy()
     
     # Handle different input ranges
@@ -269,7 +257,6 @@ def tensor_to_image(tensor: torch.Tensor) -> np.ndarray:
         # Input is in [0, 1] range, scale to [0, 255]
         arr = arr * 255.0
     
-    # Convert from CHW to HWC format
     if len(arr.shape) == 3:  # [C, H, W]
         img = arr.transpose(1, 2, 0)  # [H, W, C]
     elif len(arr.shape) == 2:  # [H, W] - grayscale
@@ -277,7 +264,17 @@ def tensor_to_image(tensor: torch.Tensor) -> np.ndarray:
     else:
         raise ValueError(f"Unexpected tensor shape: {arr.shape}")
     
-    # Clip values to valid range and convert to uint8
     img = np.clip(img, 0, 255).astype(np.uint8)
     
+    return img
+
+
+def _render_targets_to_image(img: np.ndarray, box_labels: torch.Tensor):
+    """Render ground truth boxes on image"""
+    img = np.ascontiguousarray(img, dtype=np.uint8)
+    for i in range(box_labels.shape[0]):
+        x1, y1, x2, y2 = box_labels[i].tolist()
+        pt1 = (int(round(x1)), int(round(y1)))
+        pt2 = (int(round(x2)), int(round(y2)))
+        cv2.rectangle(img, pt1, pt2, (255, 0, 0), 1)
     return img

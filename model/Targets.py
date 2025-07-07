@@ -2,7 +2,7 @@ from typing import Tuple, List
 import torch  # ← ADD THIS LINE
 import math
 def generate_targets(img_shape, class_labels_by_batch, box_labels_by_batch, strides):
-    """Simplified FCOS target generation based on the original paper"""
+
     batch_size, _, img_h, img_w = img_shape
     
     class_targets = []
@@ -10,13 +10,12 @@ def generate_targets(img_shape, class_labels_by_batch, box_labels_by_batch, stri
     box_targets = []
     
     # Use original FCOS size ranges
-    size_ranges = [(0, 64), (64, 128), (128, 256), (256, 512), (512, float('inf'))]
+    size_ranges = [(0, 40), (40, 60), (60, 128), (128, 225), (225, float('inf'))]
     
     for level_idx, stride in enumerate(strides):
         feat_h, feat_w = img_h // stride, img_w // stride
         min_size, max_size = size_ranges[level_idx]
-        
-        # Initialize all as background
+    
         cls_target = torch.zeros((batch_size, feat_h, feat_w), dtype=torch.long)
         cen_target = torch.zeros((batch_size, feat_h, feat_w), dtype=torch.float32)
         box_target = torch.zeros((batch_size, feat_h, feat_w, 4), dtype=torch.float32)
@@ -30,7 +29,6 @@ def generate_targets(img_shape, class_labels_by_batch, box_labels_by_batch, stri
                 w, h = x2 - x1, y2 - y1
                 max_side = max(w, h)
                 
-                # Size filtering
                 if not (min_size <= max_side < max_size):
                     continue
                 
