@@ -13,7 +13,7 @@ from pycocotools.coco import COCO
 import cv2
 
 # Import existing functions from your modules
-from inference import detections_from_network_output, render_detections_to_image,debug_detections_from_network_output
+from inference import detections_from_network_output, render_detections_to_image
 from FPN import FPN, normalize_batch, FocalLoss
 from Targets import generate_targets
 logger = logging.getLogger(__name__)
@@ -187,13 +187,15 @@ def _compute_loss(
         box_p_flat = box_p.view(-1, 4)
         box_t_flat = box_t.view(-1, 4)
         
+        pos_mask = cls_t_flat > 0
+        
         # Classification loss
         cls_loss = focal_loss_fn(cls_p_flat, cls_t_flat)
         weighted_cls_loss = cls_loss * cen_t_flat[pos_mask].detach().clamp(0.1)
         classification_losses.append(weighted_cls_loss)
 
         # Centerness loss (only on positive samples)
-        pos_mask = cls_t_flat > 0
+
         if pos_mask.sum() > 0:
             cen_loss = cen_loss_fn(cen_p_flat[pos_mask], cen_t_flat[pos_mask]).mean()
             centerness_losses.append(cen_loss)
@@ -214,6 +216,18 @@ def _compute_loss(
                   regression_weight * total_reg_loss)
     
     return total_loss, total_cls_loss, total_cen_loss, total_reg_loss
+
+
+
+def _render_targets_to_image(img: np.ndarray, box_labels: torch.Tensor):
+    """Render ground truth boxes on image"""
+    img = np.ascontiguousarray(img, dtype=np.uint8)
+    for i in range(box_labels.shape[0]):
+        x1, y1, x2, y2 = box_labels[i].tolist()
+        pt1 = (int(round(x1)), int(round(y1)))
+        pt2 = (int(round(x2)), int(round(y2)))
+        cv2.rectangle(img, pt1, pt2, (255, 0, 0), 1)
+    return img
 
 
 def unfreeze_backbone_gradually(model, epoch):
@@ -308,8 +322,7 @@ def train(train_dir: pathlib.Path, val_dir: pathlib.Path, writer, resume_ckpt_pa
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=NUM_EPOCHS)
     # Initialize start epoch
     start_epoch = 1
-    
-    
+        
     # Focal loss for class imbalance
     focal_loss = FocalLoss(alpha=0.25, gamma=2.0, num_classes=num_classes)
 
@@ -375,93 +388,36 @@ def train(train_dir: pathlib.Path, val_dir: pathlib.Path, writer, resume_ckpt_pa
         avg_cen_loss = np.mean(epoch_cen_losses)
         avg_reg_loss = np.mean(epoch_reg_losses)
         
-       # Validation phase
+        print(f"Epoch {epoch} completed:")
+        print(f"  Avg Total Loss: {avg_loss:.4f}")
+        print(f"  Avg Cls Loss: {avg_cls_loss:.4f}")
+        print(f"  Avg Cen Loss: {avg_cen_loss:.4f}")
+        print(f"  Avg Reg Loss: {avg_reg_loss:.4f}")
+        
+        # Validation phase
         if epoch % 5 == 0:  # Validate every 5 epochs
             model.eval()
-            val_losses = []  # Moved inside to reset each validation phase
-            val_cls_losses = []
-            val_cen_losses = []
-            val_reg_losses = []
-            
             with torch.no_grad():
                 for i, (x, class_labels, box_labels) in enumerate(val_loader):
-                    if i >= 5:  # Only validate on first 5 batches
+                    if i >= 5:  # Only validate on first 5 images
                         break
                         
                     x = x.to(device)
                     batch_norm = normalize_batch(x)
                     cls_pred, cen_pred, box_pred = model(batch_norm)
                     
-                    # Generate validation targets
-                    class_targets, centerness_targets, box_targets = generate_targets(
-                        x.shape, class_labels, box_labels, model.strides
+                    H, W = x.shape[2], x.shape[3]
+                    detections = detections_from_network_output(
+                        H, W, cls_pred, cen_pred, box_pred, model.scales, model.strides
                     )
                     
-                    # Compute validation loss
-                    total_val_loss, cls_loss, cen_loss, reg_loss = _compute_loss(
-                        cls_pred, cen_pred, box_pred,
-                        class_targets, centerness_targets, box_targets,
-                        focal_loss, CLASSIFICATION_WEIGHT, CENTERNESS_WEIGHT, REGRESSION_WEIGHT
-                    )
-                    
-                    # Track losses
-                    val_losses.append(total_val_loss.item())
-                    val_cls_losses.append(cls_loss.item())
-                    val_cen_losses.append(cen_loss.item())
-                    val_reg_losses.append(reg_loss.item())
-                    
-    
-            # Calculate average validation metrics
-            avg_val_loss = np.mean(val_losses)
-            avg_val_cls = np.mean(val_cls_losses)
-            avg_val_cen = np.mean(val_cen_losses)
-            avg_val_reg = np.mean(val_reg_losses)
-            
-            print(f"\nValidation Results - Epoch {epoch}:")
-            print(f"  Avg Val Loss: {avg_val_loss:.4f}")
-            print(f"  Avg Cls Loss: {avg_val_cls:.4f}")
-            print(f"  Avg Cen Loss: {avg_val_cen:.4f}")
-            print(f"  Avg Reg Loss: {avg_val_reg:.4f}")
-            
-            # Early stopping logic
-            if avg_val_loss < best_val_loss:
-                print(f"Validation loss improved from {best_val_loss:.4f} to {avg_val_loss:.4f}")
-                best_val_loss = avg_val_loss
-                early_stop_counter = 0
-                
-                # Save best model
-                torch.save({
-                    'model_state': model.state_dict(),
-                    'epoch': epoch,
-                    'val_loss': best_val_loss
-                }, ckpt_path)
-                print(f"Saved new best model to {ckpt_path}")
-            else:
-                print(f"Validation loss did not improve (best: {best_val_loss:.4f})")
-                early_stop_counter += 1
-                
-                # Visualization of failure cases
-                if early_stop_counter > 2:
-                    print("Analyzing failure cases...")
-                    with torch.no_grad():
-                        x, class_labels, box_labels = next(iter(val_loader))
-                        x = x.to(device)
-                        batch_norm = normalize_batch(x)
-                        cls_pred, cen_pred, box_pred = model(batch_norm)
+                    if i == 0:  # Visualize first validation image
+                        img_vis = tensor_to_image(x[0])
+                        img_with_dets = render_detections_to_image(img_vis.copy(), detections[0])
+                        img_with_targets = _render_targets_to_image(img_vis.copy(), box_labels[0])
                         
-                        # Debug visualization
-                        H, W = x.shape[2], x.shape[3]
-                        detections = debug_detections_from_network_output(
-                            H, W, cls_pred, cen_pred, box_pred, 
-                            model.scales, model.strides
-                        )
-                        print(f"Debug detections: {len(detections[0])}")
-            
-            # Check for early stopping
-            if early_stop_counter > 5:
-                print("Early stopping triggered - validation loss hasn't improved for 5 epochs")
-                break
-                
+                        print(f"Validation image 0: {len(detections[0])} detections, "
+                                   f"{len(box_labels[0])} ground truth boxes")
 
         # Save checkpoint every 3 epochs
         if epoch % 10 == 0 or epoch == NUM_EPOCHS:
