@@ -13,7 +13,7 @@ from pycocotools.coco import COCO
 import cv2
 
 # Import existing functions from your modules
-from inference import detections_from_network_output, render_detections_to_image
+from inference import detections_from_network_output, render_detections_to_image,debug_detections_from_network_output
 from FPN import FPN, normalize_batch, FocalLoss
 from Targets import generate_targets
 logger = logging.getLogger(__name__)
@@ -33,7 +33,7 @@ class COCOData(Dataset):
     def __init__(self,
                  split_dir: pathlib.Path,
                  image_size=(800, 1200),
-                 min_area=6,
+                 min_area=2,
                  max_detections=None):
         self.split_dir = pathlib.Path(split_dir)
         if not self.split_dir.exists():
@@ -83,7 +83,6 @@ class COCOData(Dataset):
         ann_ids = self.coco.getAnnIds(imgIds=img_id)
         anns = self.coco.loadAnns(ann_ids)
         boxes, labels = [], []
-        print(f"Image {idx}: loaded {len(anns)} raw annotations")
         for ann in anns:
             x, y, w, h = ann['bbox']
             if w * h < self.min_area:
@@ -93,7 +92,6 @@ class COCOData(Dataset):
             y1n = y1 * scale + paste_y
             x2n = x2 * scale + paste_x
             y2n = y2 * scale + paste_y
-            print(f"    Transformed: ({x1n:.1f}, {y1n:.1f}, {x2n:.1f}, {y2n:.1f})")
             x1n, y1n = max(0, x1n), max(0, y1n)
             x2n, y2n = min(target_w, x2n), min(target_h, y2n)
             
@@ -103,7 +101,6 @@ class COCOData(Dataset):
                     labels.append(self.cat_id_to_contiguous[ann['category_id']])
                     if self.max_detections and len(boxes) >= self.max_detections:
                         break
-                print(f"    Final: ({x1n:.1f}, {y1n:.1f}, {x2n:.1f}, {y2n:.1f})")
         if boxes:
             return img_tensor, torch.tensor(labels, dtype=torch.long), torch.tensor(boxes, dtype=torch.float32)
         return img_tensor, torch.zeros((0,), dtype=torch.long), torch.zeros((0,4), dtype=torch.float32)
@@ -192,8 +189,9 @@ def _compute_loss(
         
         # Classification loss
         cls_loss = focal_loss_fn(cls_p_flat, cls_t_flat)
-        classification_losses.append(cls_loss)
-        
+        weighted_cls_loss = cls_loss * cen_t_flat[pos_mask].detach().clamp(0.1)
+        classification_losses.append(weighted_cls_loss)
+
         # Centerness loss (only on positive samples)
         pos_mask = cls_t_flat > 0
         if pos_mask.sum() > 0:
@@ -295,8 +293,8 @@ def train(train_dir: pathlib.Path, val_dir: pathlib.Path, writer, resume_ckpt_pa
         raise FileNotFoundError(f"Validation directory not found: {val_dir.absolute()}")
     
     print("Creating datasets...")
-    train_dataset = COCOData(train_dir, image_size=IMAGE_SIZE, min_area=6)
-    val_dataset = COCOData(val_dir, image_size=IMAGE_SIZE, min_area=6)
+    train_dataset = COCOData(train_dir, image_size=IMAGE_SIZE, min_area=2)
+    val_dataset = COCOData(val_dir, image_size=IMAGE_SIZE, min_area=2)
 
     num_classes = train_dataset.get_num_classes()
     class_names = train_dataset.get_class_names()
@@ -319,8 +317,7 @@ def train(train_dir: pathlib.Path, val_dir: pathlib.Path, writer, resume_ckpt_pa
     optimizer = create_optimizer(model, BASE_LR)
     
     # Learning rate scheduler
-    scheduler = torch.optim.lr_scheduler.StepLR(optimizer, step_size=20, gamma=0.1)
-    
+    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=NUM_EPOCHS)
     # Initialize start epoch
     start_epoch = 1
     
@@ -410,36 +407,101 @@ def train(train_dir: pathlib.Path, val_dir: pathlib.Path, writer, resume_ckpt_pa
         avg_cen_loss = np.mean(epoch_cen_losses)
         avg_reg_loss = np.mean(epoch_reg_losses)
         
-        print(f"Epoch {epoch} completed:")
-        print(f"  Avg Total Loss: {avg_loss:.4f}")
-        print(f"  Avg Cls Loss: {avg_cls_loss:.4f}")
-        print(f"  Avg Cen Loss: {avg_cen_loss:.4f}")
-        print(f"  Avg Reg Loss: {avg_reg_loss:.4f}")
-        
-        # Validation phase
+       # Validation phase
         if epoch % 5 == 0:  # Validate every 5 epochs
             model.eval()
+            val_losses = []  # Moved inside to reset each validation phase
+            val_cls_losses = []
+            val_cen_losses = []
+            val_reg_losses = []
+            
             with torch.no_grad():
                 for i, (x, class_labels, box_labels) in enumerate(val_loader):
-                    if i >= 5:  # Only validate on first 5 images
+                    if i >= 5:  # Only validate on first 5 batches
                         break
                         
                     x = x.to(device)
                     batch_norm = normalize_batch(x)
                     cls_pred, cen_pred, box_pred = model(batch_norm)
                     
-                    H, W = x.shape[2], x.shape[3]
-                    detections = detections_from_network_output(
-                        H, W, cls_pred, cen_pred, box_pred, model.scales, model.strides
+                    # Generate validation targets
+                    class_targets, centerness_targets, box_targets = generate_targets(
+                        x.shape, class_labels, box_labels, model.strides
                     )
                     
-                    if i == 0:  # Visualize first validation image
+                    # Compute validation loss
+                    total_val_loss, cls_loss, cen_loss, reg_loss = _compute_loss(
+                        cls_pred, cen_pred, box_pred,
+                        class_targets, centerness_targets, box_targets,
+                        focal_loss, CLASSIFICATION_WEIGHT, CENTERNESS_WEIGHT, REGRESSION_WEIGHT
+                    )
+                    
+                    # Track losses
+                    val_losses.append(total_val_loss.item())
+                    val_cls_losses.append(cls_loss.item())
+                    val_cen_losses.append(cen_loss.item())
+                    val_reg_losses.append(reg_loss.item())
+                    
+                    # Visualize first validation image
+                    if i == 0:
+                        H, W = x.shape[2], x.shape[3]
+                        detections = detections_from_network_output(
+                            H, W, cls_pred, cen_pred, box_pred, 
+                            model.scales, model.strides
+                        )
                         img_vis = tensor_to_image(x[0])
-                        img_with_dets = render_detections_to_image(img_vis.copy(), detections[0])
-                        img_with_targets = _render_targets_to_image(img_vis.copy(), box_labels[0])
+            
+            # Calculate average validation metrics
+            avg_val_loss = np.mean(val_losses)
+            avg_val_cls = np.mean(val_cls_losses)
+            avg_val_cen = np.mean(val_cen_losses)
+            avg_val_reg = np.mean(val_reg_losses)
+            
+            print(f"\nValidation Results - Epoch {epoch}:")
+            print(f"  Avg Val Loss: {avg_val_loss:.4f}")
+            print(f"  Avg Cls Loss: {avg_val_cls:.4f}")
+            print(f"  Avg Cen Loss: {avg_val_cen:.4f}")
+            print(f"  Avg Reg Loss: {avg_val_reg:.4f}")
+            
+            # Early stopping logic
+            if avg_val_loss < best_val_loss:
+                print(f"Validation loss improved from {best_val_loss:.4f} to {avg_val_loss:.4f}")
+                best_val_loss = avg_val_loss
+                early_stop_counter = 0
+                
+                # Save best model
+                torch.save({
+                    'model_state': model.state_dict(),
+                    'epoch': epoch,
+                    'val_loss': best_val_loss
+                }, ckpt_path)
+                print(f"Saved new best model to {ckpt_path}")
+            else:
+                print(f"Validation loss did not improve (best: {best_val_loss:.4f})")
+                early_stop_counter += 1
+                
+                # Visualization of failure cases
+                if early_stop_counter > 2:
+                    print("Analyzing failure cases...")
+                    with torch.no_grad():
+                        x, class_labels, box_labels = next(iter(val_loader))
+                        x = x.to(device)
+                        batch_norm = normalize_batch(x)
+                        cls_pred, cen_pred, box_pred = model(batch_norm)
                         
-                        print(f"Validation image 0: {len(detections[0])} detections, "
-                                   f"{len(box_labels[0])} ground truth boxes")
+                        # Debug visualization
+                        H, W = x.shape[2], x.shape[3]
+                        detections = debug_detections_from_network_output(
+                            H, W, cls_pred, cen_pred, box_pred, 
+                            model.scales, model.strides
+                        )
+                        print(f"Debug detections: {len(detections[0])}")
+            
+            # Check for early stopping
+            if early_stop_counter > 5:
+                print("Early stopping triggered - validation loss hasn't improved for 5 epochs")
+                break
+                
 
         # Save checkpoint every 3 epochs
         if epoch % 10 == 0 or epoch == NUM_EPOCHS:

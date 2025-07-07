@@ -222,7 +222,7 @@ def _gather_detections(classes, centernesses, boxes, max_detections=DEFAULT_MAX_
 
         class_scores_i = class_scores_i.mul(centerness_i)
 
-        non_minimal_points = class_scores_i > 0.05
+        non_minimal_points = class_scores_i > 0.001
 
         class_scores_i = class_scores_i[non_minimal_points]
         boxes_i = boxes_i[non_minimal_points]
@@ -236,7 +236,7 @@ def _gather_detections(classes, centernesses, boxes, max_detections=DEFAULT_MAX_
         top_classes_i = torch.index_select(class_indices_i, 0, top_detection_indices)
         top_scores_i = torch.index_select(class_scores_i, 0, top_detection_indices)
 
-        boxes_to_keep = torchvision.ops.nms(top_boxes_i, top_scores_i, 0.3)
+        boxes_to_keep = torchvision.ops.nms(top_boxes_i, top_scores_i, 0.5)
 
         top_boxes_i = top_boxes_i[boxes_to_keep]
         top_classes_i = top_classes_i[boxes_to_keep]

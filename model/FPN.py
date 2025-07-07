@@ -58,9 +58,12 @@ class FPN(nn.Module):
         # FIXED: Consistent configuration for 5 levels
         self.strides = [4, 8, 16, 32, 64]
         self.scales = nn.Parameter(torch.tensor([6.0, 4.0, 4.0, 3.0, 2.0]))
-
         
         # FIXED: 5 CBAM modules for 5 FPN levels
+        self.fpn_cbam12 = nn.ModuleList([
+            CBAM(256, reduction=4) for _ in range(5)  # P2, P3, P4, P5, P6
+        ])
+        
         self.fpn_cbam = nn.ModuleList([
             CBAM(256, reduction=8) for _ in range(5)  # P2, P3, P4, P5, P6
         ])
@@ -111,7 +114,7 @@ class FPN(nn.Module):
         self.regression_to_bbox = nn.Conv2d(128, 4, kernel_size=3, padding=1)
         
         # Loss function
-        self.focal_loss = FocalLoss(alpha=0.25, gamma=2.0, num_classes=num_classes)
+        self.focal_loss = FocalLoss(alpha=0.5, gamma=1.5, num_classes=num_classes)
         
         # Initialize weights
         self._initialize_weights()
@@ -154,8 +157,8 @@ class FPN(nn.Module):
         p2 = self.lateral_convs[0](c2) + _upsample(p3, c2.shape[2:])
         
         # FIXED: Apply CBAM to all levels including P6
-        p2 = self.fpn_cbam[0](p2)  # Fine details
-        p3 = self.fpn_cbam[1](p3)  # Main Braille level
+        p2 = self.fpn_cbam12[0](p2)  # Fine details
+        p3 = self.fpn_cbam12[1](p3)  # Main Braille level
         p4 = self.fpn_cbam[2](p4)  # Larger characters
         p5 = self.fpn_cbam[3](p5)  # Character groups
         
@@ -179,7 +182,7 @@ class FPN(nn.Module):
             
             # FIXED: Regression branch without torch.exp
             reg_features = self.regression_head(fpn_feature)
-            bbox_pred = F.relu(self.regression_to_bbox(reg_features)) * scale
+            bbox_pred = torch.exp(self.regression_to_bbox(reg_features)) * scale
             
             # Reshape outputs: B[C]HW -> BHW[C]
             classes = classes.permute(0, 2, 3, 1).contiguous()

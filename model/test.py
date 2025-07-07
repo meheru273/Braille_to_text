@@ -77,7 +77,7 @@ def main():
         return
     
     # 2. Load and preprocess image
-    img_path = "before2.jpg"
+    img_path = "B38.jpg"
     try:
         # Load original image
         img_bgr = cv2.imread(img_path)
