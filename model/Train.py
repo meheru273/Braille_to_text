@@ -129,56 +129,42 @@ def _compute_loss(
     focal_loss_fn, classification_weight=2.0, centerness_weight=1.0, regression_weight=2.0
 ):
     """Fixed loss computation that handles shape mismatches"""
-    
+
     device = classes[0].device
     num_classes = classes[0].shape[-1]
-    
+
     box_loss_fn = torch.nn.SmoothL1Loss(reduction='none')
     cen_loss_fn = torch.nn.BCELoss(reduction='none')
-    
+
     classification_losses = []
     centerness_losses = []
     regression_losses = []
-    
+
     for idx in range(len(classes)):
         cls_p = classes[idx]  # [B, H, W, num_classes]
         cen_p = centernesses[idx]  # [B, H, W]
         box_p = boxes[idx]    # [B, H, W, 4]
-        
+
         cls_t = class_targets[idx].to(device)  # [B, H_target, W_target]
         cen_t = centerness_targets[idx].to(device)  # [B, H_target, W_target]
         box_t = box_targets[idx].to(device)  # [B, H_target, W_target, 4]
-    
-    
-        # FIXED: Resize targets to match model output if shapes don't match
+
+        # Resize targets to match model output if shapes don't match
         B, H_pred, W_pred = cls_p.shape[:3]
         B_t, H_target, W_target = cls_t.shape
-        
+
         if (H_pred, W_pred) != (H_target, W_target):
-            
             # Resize class targets using nearest neighbor
-            cls_t = F.interpolate(
-                cls_t.float().unsqueeze(1), 
-                size=(H_pred, W_pred), 
-                mode='nearest'
-            ).squeeze(1).long()
-            
+            cls_t = F.interpolate(cls_t.float().unsqueeze(1),size=(H_pred, W_pred),
+                                  mode='nearest').squeeze(1).long()
             # Resize centerness targets using bilinear
-            cen_t = F.interpolate(
-                cen_t.unsqueeze(1), 
-                size=(H_pred, W_pred), 
-                mode='bilinear', 
-                align_corners=False
-            ).squeeze(1)
-            
+            cen_t = F.interpolate(cen_t.unsqueeze(1),size=(H_pred, W_pred),
+                mode='bilinear',align_corners=False).squeeze(1)
+
             # Resize box targets
-            box_t = F.interpolate(
-                box_t.permute(0, 3, 1, 2), 
-                size=(H_pred, W_pred), 
-                mode='bilinear', 
-                align_corners=False
-            ).permute(0, 2, 3, 1)
-        
+            box_t = F.interpolate( box_t.permute(0, 3, 1, 2),size=(H_pred, W_pred),
+                mode='bilinear',align_corners=False).permute(0, 2, 3, 1)
+
         # Flatten for loss computation
         cls_p_flat = cls_p.view(-1, num_classes)
         cls_t_flat = cls_t.view(-1)
@@ -186,36 +172,33 @@ def _compute_loss(
         cen_t_flat = cen_t.view(-1)
         box_p_flat = box_p.view(-1, 4)
         box_t_flat = box_t.view(-1, 4)
-        
+
         pos_mask = cls_t_flat > 0
-        
+
         # Classification loss
         cls_loss = focal_loss_fn(cls_p_flat, cls_t_flat)
-        weighted_cls_loss = cls_loss * cen_t_flat[pos_mask].detach().clamp(0.1)
-        classification_losses.append(weighted_cls_loss)
+        classification_losses.append(cls_loss)
 
         # Centerness loss (only on positive samples)
-
         if pos_mask.sum() > 0:
             cen_loss = cen_loss_fn(cen_p_flat[pos_mask], cen_t_flat[pos_mask]).mean()
             centerness_losses.append(cen_loss)
-            
+
             # Regression loss (only on positive samples)
             reg_loss = box_loss_fn(box_p_flat[pos_mask], box_t_flat[pos_mask]).mean()
             regression_losses.append(reg_loss)
-        
-        # print(f"  Positive samples: {pos_mask.sum()}")
-    
+
     # Compute total loss
     total_cls_loss = torch.stack(classification_losses).mean() if classification_losses else torch.tensor(0.0, device=device)
     total_cen_loss = torch.stack(centerness_losses).mean() if centerness_losses else torch.tensor(0.0, device=device)
     total_reg_loss = torch.stack(regression_losses).mean() if regression_losses else torch.tensor(0.0, device=device)
-    
-    total_loss = (classification_weight * total_cls_loss + 
-                  centerness_weight * total_cen_loss + 
+
+    total_loss = (classification_weight * total_cls_loss +
+                  centerness_weight * total_cen_loss +
                   regression_weight * total_reg_loss)
-    
+
     return total_loss, total_cls_loss, total_cen_loss, total_reg_loss
+
 
 
 
