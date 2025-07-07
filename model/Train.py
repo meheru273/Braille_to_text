@@ -216,26 +216,14 @@ def _compute_loss(
     return total_loss, total_cls_loss, total_cen_loss, total_reg_loss
 
 
-
-def _render_targets_to_image(img: np.ndarray, box_labels: torch.Tensor):
-    """Render ground truth boxes on image"""
-    img = np.ascontiguousarray(img, dtype=np.uint8)
-    for i in range(box_labels.shape[0]):
-        x1, y1, x2, y2 = box_labels[i].tolist()
-        pt1 = (int(round(x1)), int(round(y1)))
-        pt2 = (int(round(x2)), int(round(y2)))
-        cv2.rectangle(img, pt1, pt2, (255, 0, 0), 1)
-    return img
-
-
 def unfreeze_backbone_gradually(model, epoch):
     """Gradually unfreeze backbone layers during training"""
     if hasattr(model, 'backbone') and hasattr(model.backbone, 'layer4'):
-        if epoch == 10:
+        if epoch == 5:
             # Unfreeze layer4
             for param in model.backbone.layer4.parameters():
                 param.requires_grad = True
-        elif epoch == 15:
+        elif epoch == 10:
             # Unfreeze layer3
             for param in model.backbone.layer3.parameters():
                 param.requires_grad = True
@@ -321,26 +309,6 @@ def train(train_dir: pathlib.Path, val_dir: pathlib.Path, writer, resume_ckpt_pa
     # Initialize start epoch
     start_epoch = 1
     
-    # FIXED: Resume from checkpoint with weights_only=False
-    if resume_ckpt_path is not None and os.path.exists(resume_ckpt_path):
-       
-        try:
-            # Fix for PyTorch 2.6 - add weights_only=False
-            checkpoint = torch.load(resume_ckpt_path, map_location=device, weights_only=False)
-            
-            model.load_state_dict(checkpoint['model_state'])
-            optimizer.load_state_dict(checkpoint['optimizer_state'])
-            scheduler.load_state_dict(checkpoint['scheduler_state'])
-            start_epoch = checkpoint['epoch'] + 1
-            
-            print(f"Will start training from epoch {start_epoch}")
-                    
-        except Exception as e:
-            print("Starting training from scratch...")
-            start_epoch = 1
-    else:
-        if resume_ckpt_path:
-            print(f"Checkpoint not found: {resume_ckpt_path}")
     
     # Focal loss for class imbalance
     focal_loss = FocalLoss(alpha=0.25, gamma=2.0, num_classes=num_classes)
@@ -442,15 +410,7 @@ def train(train_dir: pathlib.Path, val_dir: pathlib.Path, writer, resume_ckpt_pa
                     val_cen_losses.append(cen_loss.item())
                     val_reg_losses.append(reg_loss.item())
                     
-                    # Visualize first validation image
-                    if i == 0:
-                        H, W = x.shape[2], x.shape[3]
-                        detections = detections_from_network_output(
-                            H, W, cls_pred, cen_pred, box_pred, 
-                            model.scales, model.strides
-                        )
-                        img_vis = tensor_to_image(x[0])
-            
+    
             # Calculate average validation metrics
             avg_val_loss = np.mean(val_losses)
             avg_val_cls = np.mean(val_cls_losses)
