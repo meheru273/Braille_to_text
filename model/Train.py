@@ -216,19 +216,19 @@ def _render_targets_to_image(img: np.ndarray, box_labels: torch.Tensor):
 def unfreeze_backbone_gradually(model, epoch):
     """Gradually unfreeze backbone layers during training"""
     if hasattr(model, 'backbone') and hasattr(model.backbone, 'layer4'):
-        if epoch == 5:
+        if epoch == 2:
             # Unfreeze layer4
             for param in model.backbone.layer4.parameters():
                 param.requires_grad = True
-        elif epoch == 10:
+        elif epoch == 4:
             # Unfreeze layer3
             for param in model.backbone.layer3.parameters():
                 param.requires_grad = True
-        elif epoch == 20:
+        elif epoch == 6:
             # Unfreeze layer2
             for param in model.backbone.layer2.parameters():
                 param.requires_grad = True
-        elif epoch == 30:
+        elif epoch == 8:
             # Unfreeze layer2
             for param in model.backbone.layer1.parameters():
                 param.requires_grad = True

@@ -10,7 +10,7 @@ def generate_targets(img_shape, class_labels_by_batch, box_labels_by_batch, stri
     box_targets = []
     
     # Use original FCOS size ranges
-    size_ranges = [(0, 40), (40, 60), (60, 128), (128, 225), (225, float('inf'))]
+    size_ranges = [(0, 64), (32, 96),(64, 192), (192, 384),(384, float('inf'))]
     
     for level_idx, stride in enumerate(strides):
         feat_h, feat_w = img_h // stride, img_w // stride
