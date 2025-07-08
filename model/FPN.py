@@ -57,7 +57,7 @@ class FPN(nn.Module):
         
         # FIXED: Consistent configuration for 5 levels
         self.strides = [4, 8, 16, 32, 64]
-        self.scales = nn.Parameter(torch.tensor([10.0, 6.0, 3.0, 2.0, 1.0]))
+        self.scales = nn.Parameter(torch.tensor([8.0, 4.0, 2.0, 1.0, 0.5]))
         
         # FIXED: 5 CBAM modules for 5 FPN levels
         self.fpn_cbam12 = nn.ModuleList([
