@@ -3,7 +3,7 @@ import torch.nn as nn
 import torch.nn.functional as F 
 import math
 from typing import List, Tuple
-
+import numpy as np
 # Braille character classes
 BRAILLE_CLASSES = [
     "BACKGROUND",
@@ -24,124 +24,94 @@ def _upsample(x: torch.Tensor, size) -> torch.Tensor:
     return F.interpolate(x, size=size, mode="bilinear", align_corners=False)
 
 
-import numpy as np
 
 class FocalLoss(nn.Module):
     """
-    Focal Loss with automatic class imbalance handling for FCOS
-    Supports both manual alpha values and automatic calculation from dataset
+    Focal Loss for addressing class imbalance in multi-class classification.
+    Supports manual alpha weights or automatic inverse-frequency weighting.
     """
-    def __init__(self, alpha=0.25, gamma=2.0, num_classes=28, dataset=None, max_weight=3.0):
+    def __init__(self, alpha=None, gamma=2.0,num_classes=27, reduction='mean'):
+        """
+        Args:
+            alpha (list, np.ndarray, torch.Tensor, or float, optional): 
+                - Manual weights for each class (length = num_classes).
+                - If None, no alpha weighting is applied.
+                - If "auto", alpha weights are calculated from class frequencies.
+            gamma (float): Focusing parameter to down-weight easy samples.
+            num_classes (int): Number of classes (required if alpha="auto").
+            reduction (str): Reduction method ('mean', 'sum', or 'none').
+        """
         super().__init__()
         self.gamma = gamma
+        self.reduction = reduction
         self.num_classes = num_classes
-        self.max_weight = max_weight  # Added max weight parameter
         
-        # Handle different alpha initialization modes
-        if alpha == "auto":
-            if dataset is None:
-                raise ValueError("Dataset must be provided when alpha='auto'")
-            self.alpha = self._calculate_auto_alpha(dataset)
-        elif isinstance(alpha, (list, tuple, np.ndarray)):
+        # Handle alpha initialization
+        if isinstance(alpha, (list, np.ndarray, torch.Tensor)):
             self.alpha = torch.tensor(alpha, dtype=torch.float32)
+        elif alpha == "auto":
+            if num_classes is None:
+                raise ValueError("num_classes must be provided for auto alpha calculation")
+            self.alpha = "auto"  # Placeholder for deferred calculation
         else:
-            # Single value alpha (original behavior)
-            self.alpha = alpha
-    
-    def _calculate_auto_alpha(self, dataset):
-        """Calculate class weights based on inverse frequency with capping"""
-        print("Calculating automatic class weights from dataset...")
-        
-        # Count class frequencies
-        class_counts = torch.zeros(self.num_classes)
-        total_samples = 0
-        
-        for i, (_, labels, _) in enumerate(dataset):
-            if i % 100 == 0:
-                print(f"Processing batch {i}/{len(dataset)}")
-            
-            for label in labels:
-                if 0 <= label < self.num_classes:
-                    class_counts[label] += 1
-                    total_samples += 1
-        
-        # Calculate inverse frequency weights
-        class_frequencies = class_counts / (total_samples + 1e-8)
-        alpha_weights = 1.0 / (class_frequencies + 1e-5)
-        
-        # Background class handling
-        alpha_weights[0] = alpha_weights[0] * 0.1
-        
-        # **NEW: Cap maximum weights**
-        alpha_weights = torch.clamp(alpha_weights, max=self.max_weight)
-        
-        # Normalize weights
-        alpha_weights = alpha_weights / alpha_weights.sum() * self.num_classes
-        
-        print(f"Calculated alpha weights (capped at {self.max_weight}): {alpha_weights}")
-        return alpha_weights
-    
-    def update_alpha_from_dataloader(self, dataloader):
-        """Update alpha weights using dataloader with capping"""
-        class_counts, total_samples = self._get_class_counts_from_dataloader(dataloader)
-        
-        # Calculate weights
-        class_frequencies = class_counts / (total_samples + 1e-8)
-        alpha_weights = 1.0 / (class_frequencies + 1e-5)
-        
-        # Background class handling
-        alpha_weights[0] = alpha_weights[0] * 0.1
-        
-        alpha_weights = torch.clamp(alpha_weights, max=self.max_weight)
-        
-        # Normalize weights
-        alpha_weights = alpha_weights / alpha_weights.sum() * self.num_classes
-        
-        self.alpha = alpha_weights
-        print(f"Updated alpha weights (capped at {self.max_weight}): {self.alpha}")
-    
-    def _get_class_counts_from_dataloader(self, dataloader):
-        """Alternative method using dataloader instead of dataset"""
-        class_counts = torch.zeros(self.num_classes)
-        total_samples = 0
-        
-        print("Calculating class frequencies from dataloader...")
-        for batch_idx, (_, class_labels_batch, _) in enumerate(dataloader):
-            if batch_idx % 50 == 0:
-                print(f"Processing batch {batch_idx}")
-            
-            for class_labels in class_labels_batch:
-                for label in class_labels:
-                    if 0 <= label < self.num_classes:
-                        class_counts[label] += 1
-                        total_samples += 1
-        
-        return class_counts, total_samples
-    
-    def forward(self, inputs, targets):
-        """Forward pass with proper alpha handling"""
-        ce_loss = F.cross_entropy(inputs, targets, reduction='none')
-        pt = torch.exp(-ce_loss)
-        
-        if isinstance(self.alpha, torch.Tensor):
-            if self.alpha.device != targets.device:
-                self.alpha = self.alpha.to(targets.device)
-            alpha_t = self.alpha.gather(0, targets.long())
-            focal_loss = alpha_t * (1 - pt) ** self.gamma * ce_loss
-        else:
-            focal_loss = self.alpha * (1 - pt) ** self.gamma * ce_loss
-        
-        return focal_loss.mean()
-    
-    def get_class_weights(self):
-        """Return current alpha weights for inspection"""
-        return self.alpha if isinstance(self.alpha, torch.Tensor) else torch.tensor([self.alpha])
+            self.alpha = alpha  # Scalar or None
 
+    def forward(self, inputs, targets):
+        """
+        Args:
+            inputs: Model outputs (logits) with shape (N, C, H, W) or (N, C).
+            targets: Ground truth labels with shape (N, H, W) or (N).
+        """
+        # Flatten inputs and targets for cross_entropy
+        ce_loss = F.cross_entropy(inputs, targets, reduction='none')
+        pt = torch.exp(-ce_loss)  # Probability of true class
+        
+        # Focal loss components
+        focal_weight = (1.0 - pt) ** self.gamma
+        
+        # Apply alpha weighting
+        if hasattr(self, 'alpha') and self.alpha is not None:
+            if isinstance(self.alpha, torch.Tensor):
+                alpha_tensor = self.alpha.to(targets.device)
+                alpha_t = alpha_tensor[targets]  # Gather per-class weights
+            else:
+                alpha_t = self.alpha  # Scalar alpha
+            focal_weight *= alpha_t
+        
+        focal_loss = focal_weight * ce_loss
+        
+        # Apply reduction
+        if self.reduction == 'mean':
+            return focal_loss.mean()
+        elif self.reduction == 'sum':
+            return focal_loss.sum()
+        else:
+            return focal_loss
+
+    def calculate_auto_alpha(self, dataset):
+        num_classes = self.num_classes
+        class_counts = torch.zeros(num_classes)
+        total_samples = 0
+    
+        for *_, labels in dataset:
+            # Flatten labels and convert to integers
+            labels = labels.view(-1).long()  # Flattens and ensures 1D
+            # Filter out invalid indices (e.g., ignore background class if needed)
+            valid_labels = labels[(labels >= 0) & (labels < num_classes)]
+            class_counts += torch.bincount(valid_labels, minlength=num_classes)
+            total_samples += len(valid_labels)
+
+        # Compute weights (same as before)
+        class_weights = total_samples / (num_classes * class_counts)
+        class_weights = torch.clamp(class_weights, max=5.0)
+        self.alpha = class_weights
+        print(f"Auto-calculated alpha weights: {self.alpha}")
 
 class FPN(nn.Module):
     """
-    FIXED: Optimized FPN for small Braille character detection
+    Optimized FPN for small Braille character detection
     """
+    
     def __init__(self, num_classes=None):
         super(FPN, self).__init__()
         

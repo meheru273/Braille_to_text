@@ -283,7 +283,6 @@ def train(train_dir: pathlib.Path, val_dir: pathlib.Path, writer, resume_ckpt_pa
 
     num_classes = train_dataset.get_num_classes()
     class_names = train_dataset.get_class_names()
-    logger.info(f"Train images: {len(train_dataset)}, Val images: {len(val_dataset)}")
 
     # Data loaders
     train_loader = DataLoader(train_dataset, batch_size=BATCH_SIZE, shuffle=True,
@@ -306,10 +305,8 @@ def train(train_dir: pathlib.Path, val_dir: pathlib.Path, writer, resume_ckpt_pa
     # Initialize start epoch
     start_epoch = 1
         
-    # Focal loss for class imbalance
-    focal_loss = FocalLoss(alpha=0.25, gamma=2.0, num_classes=num_classes)  # Initialize with default
-    focal_loss.update_alpha_from_dataloader(train_loader)
-    
+    focal_loss = FocalLoss(alpha="auto", gamma=2.0, num_classes=num_classes, reduction='mean')
+    focal_loss.calculate_auto_alpha(train_dataset) 
 
     print(f"Starting training from epoch {start_epoch} to {NUM_EPOCHS}...")
     
