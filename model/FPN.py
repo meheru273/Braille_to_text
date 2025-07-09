@@ -64,7 +64,8 @@ class FocalLoss(nn.Module):
         """
         counts = torch.zeros(self.num_classes, dtype=torch.float32)
         total = 0
-        for _, targets in dataloader:
+        for batch in dataloader:
+            _, targets, _ = batch
             # targets may be a list of tensors
             if isinstance(targets, list):
                 for t in targets:
