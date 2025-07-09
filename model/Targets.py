@@ -29,8 +29,8 @@ def generate_targets(img_shape, class_labels_by_batch, box_labels_by_batch, stri
                 w, h = x2 - x1, y2 - y1
                 max_side = max(w, h)
                 
-                if not (min_size <= max_side < max_size):
-                    continue
+                # if not (min_size <= max_side < max_size):
+                #     continue
                 
                 # Find all feature map locations inside this box
                 feat_x1 = max(0, int(x1 / stride))

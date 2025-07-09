@@ -23,18 +23,89 @@ def _upsample(x: torch.Tensor, size) -> torch.Tensor:
     """Upsample tensor using bilinear interpolation"""
     return F.interpolate(x, size=size, mode="bilinear", align_corners=False)
 
+
+
 class FocalLoss(nn.Module):
-    """Focal Loss for handling class imbalance"""
+    """
+    Fixed Focal Loss for handling class imbalance in FCOS
+    Supports both single alpha values and per-class weights
+    """
     def __init__(self, alpha=0.25, gamma=2.0, num_classes=28):
         super().__init__()
-        self.alpha = alpha
         self.gamma = gamma
         self.num_classes = num_classes
+        
+        # Handle different alpha initialization types
+        if isinstance(alpha, (list, tuple)):
+            self.alpha = torch.tensor(alpha, dtype=torch.float32)
+        elif isinstance(alpha, torch.Tensor):
+            self.alpha = alpha.float()
+        else:
+            # Single value alpha
+            self.alpha = alpha
+        
+        self.is_tensor_alpha = isinstance(self.alpha, torch.Tensor)
+    
+    
+    def set_weights(self, weights, min_weight=0.1, max_weight=5.0):
+        weights = torch.as_tensor(weights, dtype=torch.float32)
+        if len(weights) != self.num_classes:
+            raise ValueError(f"Expected {self.num_classes} weights, got {len(weights)}")
+        # Clip & renormalize
+        weights = torch.clamp(weights, min_weight, max_weight)
+        weights = weights * (self.num_classes / weights.sum())
+        self.alpha = weights
+        self.is_tensor_alpha = True
+
+    def update_alpha_from_dataloader(self, dataloader, min_weight=0.1, max_weight=5.0):
+        """
+        Estimate per-class alpha = inverse-frequency from the dataloader,
+        then clip and renormalize via set_weights().
+        """
+        counts = torch.zeros(self.num_classes, dtype=torch.float32)
+        total = 0
+        for _, targets in dataloader:
+            # targets may be a list of tensors
+            if isinstance(targets, list):
+                for t in targets:
+                    if t.numel():
+                        counts += torch.bincount(t, minlength=self.num_classes).float()
+                        total += t.numel()
+            else:
+                t = targets.view(-1)
+                counts += torch.bincount(t, minlength=self.num_classes).float()
+                total += t.numel()
+
+        if total == 0:
+            raise ValueError("No targets found in dataloader to compute alpha.")
+
+        freq = counts / total
+        inv = 1.0 / (freq + 1e-6)
+        weights = inv * (self.num_classes / inv.sum())
+
+        # only reset your alpha if any weight is out of bounds
+        if (weights < min_weight).any() or (weights > max_weight).any():
+            self.set_weights(weights, min_weight, max_weight)
+        
     
     def forward(self, inputs, targets):
+        # Compute cross entropy loss
         ce_loss = F.cross_entropy(inputs, targets, reduction='none')
         pt = torch.exp(-ce_loss)
-        focal_loss = self.alpha * (1 - pt) ** self.gamma * ce_loss
+        
+        # Handle alpha weighting 
+        if self.is_tensor_alpha:
+            # Per-class alpha weights
+            if self.alpha.device != targets.device:
+                self.alpha = self.alpha.to(targets.device)
+            
+            # FI index alpha weights by target class
+            alpha_t = self.alpha.gather(0, targets.long())
+            focal_loss = alpha_t * (1 - pt) ** self.gamma * ce_loss
+        else:
+            # Single alpha value (original behavior)
+            focal_loss = self.alpha * (1 - pt) ** self.gamma * ce_loss
+        
         return focal_loss.mean()
 
 class FPN(nn.Module):
@@ -57,7 +128,9 @@ class FPN(nn.Module):
         
         # FIXED: Consistent configuration for 5 levels
         self.strides = [4, 8, 16, 32, 64]
-        self.scales = nn.Parameter(torch.tensor([8.0, 4.0, 2.0, 1.0, 0.5]))
+        self.scales = nn.Parameter(torch.tensor([8.0, 6.0, 4.0, 2.5, 1.5]))
+
+
         
         # FIXED: 5 CBAM modules for 5 FPN levels
         self.fpn_cbam12 = nn.ModuleList([

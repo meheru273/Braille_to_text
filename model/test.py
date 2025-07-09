@@ -68,7 +68,7 @@ def main():
     model = FPN(num_classes=28)
     
     try:
-        ckpt = torch.load("runs/fcos_custom/fcos_epoch40.pth", map_location=device, weights_only=False)
+        ckpt = torch.load("runs/fcos_custom/fcos_epoch20.pth", map_location=device, weights_only=False)
         model.load_state_dict(ckpt["model_state"])
         model.to(device)
         print(f"[OK] Model loaded on {device}")

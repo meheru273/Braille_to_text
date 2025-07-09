@@ -308,6 +308,8 @@ def train(train_dir: pathlib.Path, val_dir: pathlib.Path, writer, resume_ckpt_pa
         
     # Focal loss for class imbalance
     focal_loss = FocalLoss(alpha=0.25, gamma=2.0, num_classes=num_classes)
+    focal_loss.update_alpha_from_dataloader(train_loader)
+    
 
     print(f"Starting training from epoch {start_epoch} to {NUM_EPOCHS}...")
     
