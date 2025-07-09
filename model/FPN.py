@@ -31,10 +31,11 @@ class FocalLoss(nn.Module):
     Focal Loss with automatic class imbalance handling for FCOS
     Supports both manual alpha values and automatic calculation from dataset
     """
-    def __init__(self, alpha=0.25, gamma=2.0, num_classes=28, dataset=None):
+    def __init__(self, alpha=0.25, gamma=2.0, num_classes=28, dataset=None, max_weight=3.0):
         super().__init__()
         self.gamma = gamma
         self.num_classes = num_classes
+        self.max_weight = max_weight  # Added max weight parameter
         
         # Handle different alpha initialization modes
         if alpha == "auto":
@@ -48,7 +49,7 @@ class FocalLoss(nn.Module):
             self.alpha = alpha
     
     def _calculate_auto_alpha(self, dataset):
-        """Calculate class weights based on inverse frequency"""
+        """Calculate class weights based on inverse frequency with capping"""
         print("Calculating automatic class weights from dataset...")
         
         # Count class frequencies
@@ -56,34 +57,48 @@ class FocalLoss(nn.Module):
         total_samples = 0
         
         for i, (_, labels, _) in enumerate(dataset):
-            if i % 100 == 0:  # Progress indicator
+            if i % 100 == 0:
                 print(f"Processing batch {i}/{len(dataset)}")
             
-            # Count each class occurrence
             for label in labels:
                 if 0 <= label < self.num_classes:
                     class_counts[label] += 1
                     total_samples += 1
         
-        print(f"Total samples processed: {total_samples}")
-        print(f"Class distribution: {class_counts}")
-        
         # Calculate inverse frequency weights
-        # Add small epsilon to avoid division by zero
         class_frequencies = class_counts / (total_samples + 1e-8)
         alpha_weights = 1.0 / (class_frequencies + 1e-5)
         
-        # Special handling for background class (class 0)
-        # Usually background should have lower weight
+        # Background class handling
         alpha_weights[0] = alpha_weights[0] * 0.1
         
-        # Normalize weights so they sum to num_classes
+        # **NEW: Cap maximum weights**
+        alpha_weights = torch.clamp(alpha_weights, max=self.max_weight)
+        
+        # Normalize weights
         alpha_weights = alpha_weights / alpha_weights.sum() * self.num_classes
         
-        print(f"Calculated alpha weights: {alpha_weights}")
-        print(f"Class 0 (background) weight: {alpha_weights[0]:.4f}")
-        
+        print(f"Calculated alpha weights (capped at {self.max_weight}): {alpha_weights}")
         return alpha_weights
+    
+    def update_alpha_from_dataloader(self, dataloader):
+        """Update alpha weights using dataloader with capping"""
+        class_counts, total_samples = self._get_class_counts_from_dataloader(dataloader)
+        
+        # Calculate weights
+        class_frequencies = class_counts / (total_samples + 1e-8)
+        alpha_weights = 1.0 / (class_frequencies + 1e-5)
+        
+        # Background class handling
+        alpha_weights[0] = alpha_weights[0] * 0.1
+        
+        alpha_weights = torch.clamp(alpha_weights, max=self.max_weight)
+        
+        # Normalize weights
+        alpha_weights = alpha_weights / alpha_weights.sum() * self.num_classes
+        
+        self.alpha = alpha_weights
+        print(f"Updated alpha weights (capped at {self.max_weight}): {self.alpha}")
     
     def _get_class_counts_from_dataloader(self, dataloader):
         """Alternative method using dataloader instead of dataset"""
@@ -103,43 +118,17 @@ class FocalLoss(nn.Module):
         
         return class_counts, total_samples
     
-    def update_alpha_from_dataloader(self, dataloader):
-        """Update alpha weights using dataloader (useful during training)"""
-        class_counts, total_samples = self._get_class_counts_from_dataloader(dataloader)
-        
-        # Calculate weights
-        class_frequencies = class_counts / (total_samples + 1e-8)
-        alpha_weights = 1.0 / (class_frequencies + 1e-5)
-        
-        # Background class handling
-        alpha_weights[0] = alpha_weights[0] * 0.1
-        alpha_weights = alpha_weights / alpha_weights.sum() * self.num_classes
-        
-        self.alpha = alpha_weights
-        print(f"Updated alpha weights: {self.alpha}")
-    
     def forward(self, inputs, targets):
-        """
-        Forward pass with proper alpha handling
-        Args:
-            inputs: [N, num_classes] - raw logits
-            targets: [N] - class indices
-        """
-        # Compute cross entropy loss
+        """Forward pass with proper alpha handling"""
         ce_loss = F.cross_entropy(inputs, targets, reduction='none')
         pt = torch.exp(-ce_loss)
         
-        # Handle alpha (class weighting)
         if isinstance(self.alpha, torch.Tensor):
-            # Per-class alpha weights
             if self.alpha.device != targets.device:
                 self.alpha = self.alpha.to(targets.device)
-            
-            # Gather alpha values for each target
             alpha_t = self.alpha.gather(0, targets.long())
             focal_loss = alpha_t * (1 - pt) ** self.gamma * ce_loss
         else:
-            # Single alpha value (original behavior)
             focal_loss = self.alpha * (1 - pt) ** self.gamma * ce_loss
         
         return focal_loss.mean()
@@ -148,11 +137,11 @@ class FocalLoss(nn.Module):
         """Return current alpha weights for inspection"""
         return self.alpha if isinstance(self.alpha, torch.Tensor) else torch.tensor([self.alpha])
 
+
 class FPN(nn.Module):
     """
     FIXED: Optimized FPN for small Braille character detection
     """
-    
     def __init__(self, num_classes=None):
         super(FPN, self).__init__()
         
