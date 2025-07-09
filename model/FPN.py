@@ -103,7 +103,7 @@ class FocalLoss(nn.Module):
 
         # Compute weights (same as before)
         class_weights = total_samples / (num_classes * class_counts)
-        class_weights = torch.clamp(class_weights, max=5.0)
+        class_weights = torch.clamp(class_weights, max=3.0)
         self.alpha = class_weights
         print(f"Auto-calculated alpha weights: {self.alpha}")
 
