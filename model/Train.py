@@ -327,7 +327,7 @@ def train(train_dir: pathlib.Path, val_dir: pathlib.Path, writer, resume_ckpt_pa
         for batch_idx, (x, class_labels, box_labels) in enumerate(train_loader):
             optimizer.zero_grad()
             x = x.to(device)
-            
+            print("batch no :", batch_idx, "of epoch", epoch)
             # Normalize batch
             batch_norm = normalize_batch(x)
             
