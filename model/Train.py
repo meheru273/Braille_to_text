@@ -228,29 +228,29 @@ def train(train_dir: pathlib.Path, val_dir: pathlib.Path, writer, resume_ckpt_pa
             cls_pred, cen_pred, box_pred = model(batch_norm)
 
             # Generate targets
-            class_targets, centerness_targets, box_targets = generate_targets(
-                x.shape, class_labels, box_labels, model.strides
-            )
-            
-            # ✅ FIX: Check if model has attention_maps attribute
-            attention_maps = getattr(model, 'attention_maps', None)
-            
-            # ✅ FIX: Use 'x.shape' instead of 'image.shape'
+            class_t, cen_t, box_t = generate_targets(
+                x.shape, class_labels, box_labels, model.strides)
+
             total_loss, cls_loss, cen_loss, reg_loss, att_loss = _compute_loss(
                 cls_pred, cen_pred, box_pred,
-                class_targets, centerness_targets, box_targets,
+                class_t, cen_t, box_t,
                 focal_loss,
-                # Add attention parameters
-                attention_maps=attention_maps,
+                attention_maps=model.attention_maps,           # already detached
                 box_labels_by_batch=box_labels,
-                img_shape=x.shape,  # ✅ FIXED: Use 'x' not 'image'
-                strides=model.strides,  # ✅ Use model.strides instead of hardcoded
-                attention_weight=0.1
-            )
-            
-            # Backward pass
-            total_loss.backward()
-            
+                img_shape=x.shape,
+                strides=model.strides,
+                attention_weight=0.1)
+
+            total_loss.backward()          # ← exactly once
+            optimizer.step()
+
+            # store **only scalars**
+            epoch_losses.append(total_loss.item())
+            epoch_cls_losses.append(cls_loss.item())
+            epoch_cen_losses.append(cen_loss.item())
+            epoch_reg_losses.append(reg_loss.item())
+            epoch_att_losses.append(att_loss.item())  # ✅ ADD: Track attention loss
+
             # Gradient clipping for stability
             torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=10.0)
             

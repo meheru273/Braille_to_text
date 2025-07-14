@@ -110,7 +110,6 @@ class FPN(nn.Module):
         if num_classes is None:
             num_classes = len(BRAILLE_CLASSES)
         
-        self.attention_maps = []
         
         self.num_classes = num_classes
         
@@ -122,14 +121,12 @@ class FPN(nn.Module):
         self.fpn_cbam = nn.ModuleList([
             CBAM(256, reduction=8) for _ in range(5)  
         ])
+
         
-        self.fpn_se = nn.ModuleList([
-            SE_Attention(256, reduction=8) for _ in range(5)  
-        ])
-        
+
         # Lateral connections for ResNet-50 channels
         self.lateral_convs = nn.ModuleList([
-            self._make_lateral_conv(64, 256),   # C2 -> P2
+            self._make_lateral_conv(64, 256),   
             self._make_lateral_conv(128, 256),   # C3 -> P3
             self._make_lateral_conv(256, 256),  # C4 -> P4  
             self._make_lateral_conv(512, 256),  # C5 -> P5
@@ -204,6 +201,8 @@ class FPN(nn.Module):
         backbone_features = self.backbone(x)   
         c2, c3, c4, c5 = backbone_features
         
+        self.attention_maps = []    
+        
         # Build FPN pyramid
         p5 = self.lateral_convs[3](c5)
         ap5 = self.fpn_cbam[3](p5)
@@ -223,7 +222,7 @@ class FPN(nn.Module):
         self.attention_maps.append(spatial_attention)
         # Add P6 level with CBAM
         p6 = self.extra_convs[0](p5)
-        ap6 = self.fpn_se[4](p6)  
+        ap6 = self.fpn_cbam[4](p6)  
         p6 = p6 + ap6
 
         # All 5 FPN levels
