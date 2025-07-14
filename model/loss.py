@@ -91,19 +91,8 @@ def _compute_loss(
 
 def compute_attention_loss(attention_maps, box_labels_by_batch, img_shape, strides, device):
     """
-    Compute attention supervision loss
-    
-    Args:
-        attention_maps: List of attention maps from FPN levels
-        box_labels_by_batch: Ground truth boxes for each batch
-        img_shape: Input image shape (B, C, H, W)
-        strides: FPN strides for each level
-        device: Device for tensor operations
-    
-    Returns:
-        Attention loss tensor
+    Compute attention supervision loss with proper tensor formatting
     """
-    # Return zero loss if no attention supervision
     if attention_maps is None or box_labels_by_batch is None:
         return torch.tensor(0.0, device=device)
         
@@ -120,14 +109,32 @@ def compute_attention_loss(attention_maps, box_labels_by_batch, img_shape, strid
             # Ensure same device
             attention_target = attention_target.to(attention_map.device)
             
-            # Resize if shapes don't match
+            # ✅ FIX: Handle tensor dimensions properly
             if attention_map.shape != attention_target.shape:
+                # Get target spatial dimensions from attention_map
+                target_spatial_size = attention_map.shape[-2:]  # (H, W)
+                
+                # ✅ FIX: Ensure attention_target is 4D for interpolation
+                if attention_target.dim() == 2:
+                    # Add batch and channel dimensions: (H, W) -> (1, 1, H, W)
+                    attention_target = attention_target.unsqueeze(0).unsqueeze(0)
+                elif attention_target.dim() == 3:
+                    # Add channel dimension: (B, H, W) -> (B, 1, H, W)
+                    attention_target = attention_target.unsqueeze(1)
+                
+                # ✅ FIX: Use only spatial dimensions for output size
                 attention_target = F.interpolate(
-                    attention_target.unsqueeze(1), 
-                    size=attention_map.shape[1:],
+                    attention_target, 
+                    size=target_spatial_size,  # Only (H, W)
                     mode='bilinear', 
                     align_corners=False
-                ).squeeze(1)
+                )
+                
+                # ✅ FIX: Match attention_map dimensions
+                if attention_map.dim() == 3:  # (B, H, W)
+                    attention_target = attention_target.squeeze(1)  # Remove channel dim
+                elif attention_map.dim() == 2:  # (H, W)
+                    attention_target = attention_target.squeeze(0).squeeze(0)  # Remove batch & channel
             
             # MSE loss
             loss = F.mse_loss(attention_map, attention_target)
