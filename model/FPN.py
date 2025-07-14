@@ -203,29 +203,34 @@ class FPN(nn.Module):
         
         self.attention_maps = []    
         
-        # Build FPN pyramid
+         # Build FPN pyramid (top-down)
         p5 = self.lateral_convs[3](c5)
-        ap5 = self.fpn_cbam[3](p5)
-        p5= p5+ap5
+        ap5 = self.fpn_cbam[3](p5)  
+        p5 = p5 + ap5
+        self.attention_maps.append(ap5.mean(1, keepdim=True).detach())  
+        
         p4 = self.lateral_convs[2](c4) + _upsample(p5, c4.shape[2:])
-        ap4 = self.fpn_cbam[2](p4)
+        ap4 = self.fpn_cbam[2](p4) 
         p4 = p4 + ap4
+        self.attention_maps.append(ap4.mean(1, keepdim=True).detach()) 
+        
         p3 = self.lateral_convs[1](c3) + _upsample(p4, c3.shape[2:])
-        ap3 = self.fpn_cbam[1](p3)
+        ap3 = self.fpn_cbam[1](p3)  
         p3 = p3 + ap3
-        p2 = self.lateral_convs[0](c2) + _upsample(p3, c2.shape[2:])
+        self.attention_maps.append(ap3.mean(1, keepdim=True).detach())  
         
         p2 = self.lateral_convs[0](c2) + _upsample(p3, c2.shape[2:])
-        ap2 = self.fpn_cbam[0](p2)
+        ap2 = self.fpn_cbam[0](p2) 
         p2 = p2 + ap2
-        spatial_attention = torch.mean(ap5, dim=1)  # Average across channels
-        self.attention_maps.append(spatial_attention)
-        # Add P6 level with CBAM
+        self.attention_maps.append(ap2.mean(1, keepdim=True).detach())  
+        
+        # Generate P6 level
         p6 = self.extra_convs[0](p5)
         ap6 = self.fpn_cbam[4](p6)  
         p6 = p6 + ap6
-
-        # All 5 FPN levels
+        self.attention_maps.append(ap6.mean(1, keepdim=True).detach()) 
+        
+        # All 5 FPN levels in correct order
         fpn_features = [p2, p3, p4, p5, p6]
         
         # Apply detection heads
