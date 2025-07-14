@@ -48,3 +48,35 @@ class CBAM(nn.Module):
         # Then apply spatial attention
         x = self.spatial_attention(x)
         return x
+
+class SE_Attention(nn.Module):
+    def __init__(self, in_channels, reduction=16):
+        super(SE_Attention, self).__init__()
+        self.avg_pool = nn.AdaptiveAvgPool2d(1)
+        self.fc = nn.Sequential(
+            nn.Conv2d(in_channels, in_channels // reduction, 1, bias=False),
+            nn.ReLU(inplace=True),
+            nn.Conv2d(in_channels // reduction*2, in_channels, 1, bias=False),
+            nn.ReLU(inplace=True),
+            nn.Conv2d(in_channels // reduction, in_channels, 1, bias=False),
+            nn.Sigmoid()
+        )
+    
+    def forward(self, x):
+        se = self.avg_pool(x)
+        se = self.fc(se)
+        return x * se
+    
+class MultiScaleAttention(nn.Module):
+    def __init__(self, in_channels, reduction=16):
+        super(MultiScaleAttention, self).__init__()
+        self.se_attention = SE_Attention(in_channels, reduction)
+        self.cbam_attention = CBAM(in_channels, reduction)
+    
+    def forward(self, x):
+        # Apply SE attention
+        se_out = self.se_attention(x)
+        # Apply CBAM attention
+        cbam_out = self.cbam_attention(x)
+        # Combine both attentions
+        return se_out + cbam_out

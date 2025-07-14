@@ -18,13 +18,7 @@ from FPN import FPN, normalize_batch, FocalLoss
 from Targets import generate_targets
 logger = logging.getLogger(__name__)
 
-
-import pathlib
-import torch
-from torch.utils.data import Dataset
-import numpy as np
-from PIL import Image
-from pycocotools.coco import COCO
+from loss import _compute_loss, compute_attention_loss
 
 class COCOData(Dataset):
     """
@@ -104,6 +98,7 @@ class COCOData(Dataset):
         if boxes:
             return img_tensor, torch.tensor(labels, dtype=torch.long), torch.tensor(boxes, dtype=torch.float32)
         return img_tensor, torch.zeros((0,), dtype=torch.long), torch.zeros((0,4), dtype=torch.float32)
+    
     def get_num_classes(self):
         return self.num_classes
 
@@ -124,83 +119,6 @@ def tensor_to_image(tensor):
     return img
 
 
-def _compute_loss(
-    classes, centernesses, boxes, class_targets, centerness_targets, box_targets,
-    focal_loss_fn, classification_weight=2.0, centerness_weight=1.0, regression_weight=2.0
-):
-    """Fixed loss computation that handles shape mismatches"""
-
-    device = classes[0].device
-    num_classes = classes[0].shape[-1]
-
-    box_loss_fn = torch.nn.SmoothL1Loss(reduction='none')
-    cen_loss_fn = torch.nn.BCELoss(reduction='none')
-
-    classification_losses = []
-    centerness_losses = []
-    regression_losses = []
-
-    for idx in range(len(classes)):
-        cls_p = classes[idx]  # [B, H, W, num_classes]
-        cen_p = centernesses[idx]  # [B, H, W]
-        box_p = boxes[idx]    # [B, H, W, 4]
-
-        cls_t = class_targets[idx].to(device)  # [B, H_target, W_target]
-        cen_t = centerness_targets[idx].to(device)  # [B, H_target, W_target]
-        box_t = box_targets[idx].to(device)  # [B, H_target, W_target, 4]
-
-        # Resize targets to match model output if shapes don't match
-        B, H_pred, W_pred = cls_p.shape[:3]
-        B_t, H_target, W_target = cls_t.shape
-
-        if (H_pred, W_pred) != (H_target, W_target):
-            # Resize class targets using nearest neighbor
-            cls_t = F.interpolate(cls_t.float().unsqueeze(1),size=(H_pred, W_pred),
-                                  mode='nearest').squeeze(1).long()
-            # Resize centerness targets using bilinear
-            cen_t = F.interpolate(cen_t.unsqueeze(1),size=(H_pred, W_pred),
-                mode='bilinear',align_corners=False).squeeze(1)
-
-            # Resize box targets
-            box_t = F.interpolate( box_t.permute(0, 3, 1, 2),size=(H_pred, W_pred),
-                mode='bilinear',align_corners=False).permute(0, 2, 3, 1)
-
-        # Flatten for loss computation
-        cls_p_flat = cls_p.view(-1, num_classes)
-        cls_t_flat = cls_t.view(-1)
-        cen_p_flat = cen_p.view(-1)
-        cen_t_flat = cen_t.view(-1)
-        box_p_flat = box_p.view(-1, 4)
-        box_t_flat = box_t.view(-1, 4)
-
-        pos_mask = cls_t_flat > 0
-
-        # Classification loss
-        cls_loss = focal_loss_fn(cls_p_flat, cls_t_flat)
-        classification_losses.append(cls_loss)
-
-        # Centerness loss (only on positive samples)
-        if pos_mask.sum() > 0:
-            cen_loss = cen_loss_fn(cen_p_flat[pos_mask], cen_t_flat[pos_mask]).mean()
-            centerness_losses.append(cen_loss)
-
-            # Regression loss (only on positive samples)
-            reg_loss = box_loss_fn(box_p_flat[pos_mask], box_t_flat[pos_mask]).mean()
-            regression_losses.append(reg_loss)
-
-    # Compute total loss
-    total_cls_loss = torch.stack(classification_losses).mean() if classification_losses else torch.tensor(0.0, device=device)
-    total_cen_loss = torch.stack(centerness_losses).mean() if centerness_losses else torch.tensor(0.0, device=device)
-    total_reg_loss = torch.stack(regression_losses).mean() if regression_losses else torch.tensor(0.0, device=device)
-
-    total_loss = (classification_weight * total_cls_loss +
-                  centerness_weight * total_cen_loss +
-                  regression_weight * total_reg_loss)
-
-    return total_loss, total_cls_loss, total_cen_loss, total_reg_loss
-
-
-
 
 def _render_targets_to_image(img: np.ndarray, box_labels: torch.Tensor):
     """Render ground truth boxes on image"""
@@ -211,28 +129,6 @@ def _render_targets_to_image(img: np.ndarray, box_labels: torch.Tensor):
         pt2 = (int(round(x2)), int(round(y2)))
         cv2.rectangle(img, pt1, pt2, (255, 0, 0), 1)
     return img
-
-
-def unfreeze_backbone_gradually(model, epoch):
-    """Gradually unfreeze backbone layers during training"""
-    if hasattr(model, 'backbone') and hasattr(model.backbone, 'layer4'):
-        if epoch == 2:
-            # Unfreeze layer4
-            for param in model.backbone.layer4.parameters():
-                param.requires_grad = True
-        elif epoch == 4:
-            # Unfreeze layer3
-            for param in model.backbone.layer3.parameters():
-                param.requires_grad = True
-        elif epoch == 6:
-            # Unfreeze layer2
-            for param in model.backbone.layer2.parameters():
-                param.requires_grad = True
-        elif epoch == 8:
-            # Unfreeze layer2
-            for param in model.backbone.layer1.parameters():
-                param.requires_grad = True
-
 
 def create_optimizer(model, base_lr=1e-4):
     """Create optimizer with different learning rates for backbone and new layers"""
@@ -255,11 +151,11 @@ def create_optimizer(model, base_lr=1e-4):
 
 def train(train_dir: pathlib.Path, val_dir: pathlib.Path, writer, resume_ckpt_path=None):
     """
-    Enhanced training function with resume capability
+    Enhanced training function with resume capability and fixed attention loss tracking
     """
     # Training hyperparameters optimized for small Braille characters
-    BATCH_SIZE = 2  # Reduced for ResNet-50
-    IMAGE_SIZE = (800,1200)  # Better aspect ratio for documents
+    BATCH_SIZE = 2
+    IMAGE_SIZE = (800,1200)
     BASE_LR = 1e-4
     NUM_EPOCHS = 50
     
@@ -302,7 +198,6 @@ def train(train_dir: pathlib.Path, val_dir: pathlib.Path, writer, resume_ckpt_pa
     
     # Learning rate scheduler
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=NUM_EPOCHS)
-    # Initialize start epoch
     start_epoch = 1
         
     focal_loss = FocalLoss(alpha="auto", gamma=2.0, num_classes=num_classes, reduction='mean')
@@ -310,12 +205,8 @@ def train(train_dir: pathlib.Path, val_dir: pathlib.Path, writer, resume_ckpt_pa
 
     print(f"Starting training from epoch {start_epoch} to {NUM_EPOCHS}...")
     
-    # FIXED: Use start_epoch instead of starting from 1
     for epoch in range(start_epoch, NUM_EPOCHS + 1):
         logger.info(f"Epoch {epoch}/{NUM_EPOCHS} start")
-        
-        # Gradually unfreeze backbone
-        unfreeze_backbone_gradually(model, epoch)
         
         # Training phase
         model.train()
@@ -323,27 +214,38 @@ def train(train_dir: pathlib.Path, val_dir: pathlib.Path, writer, resume_ckpt_pa
         epoch_cls_losses = []
         epoch_cen_losses = []
         epoch_reg_losses = []
+        epoch_att_losses = []  # ✅ ADD: Track attention losses
         
         for batch_idx, (x, class_labels, box_labels) in enumerate(train_loader):
             optimizer.zero_grad()
             x = x.to(device)
             print("batch no :", batch_idx, "of epoch", epoch)
+            
             # Normalize batch
             batch_norm = normalize_batch(x)
             
             # Forward pass
             cls_pred, cen_pred, box_pred = model(batch_norm)
-            
+
             # Generate targets
-            debug_enabled = (epoch == 1 and batch_idx < 3)  # Debug first 3 batches of first epoch
             class_targets, centerness_targets, box_targets = generate_targets(
                 x.shape, class_labels, box_labels, model.strides
             )
             
-            total_loss, cls_loss, cen_loss, reg_loss = _compute_loss(
+            # ✅ FIX: Check if model has attention_maps attribute
+            attention_maps = getattr(model, 'attention_maps', None)
+            
+            # ✅ FIX: Use 'x.shape' instead of 'image.shape'
+            total_loss, cls_loss, cen_loss, reg_loss, att_loss = _compute_loss(
                 cls_pred, cen_pred, box_pred,
                 class_targets, centerness_targets, box_targets,
-                focal_loss, CLASSIFICATION_WEIGHT, CENTERNESS_WEIGHT, REGRESSION_WEIGHT
+                focal_loss,
+                # Add attention parameters
+                attention_maps=attention_maps,
+                box_labels_by_batch=box_labels,
+                img_shape=x.shape,  # ✅ FIXED: Use 'x' not 'image'
+                strides=model.strides,  # ✅ Use model.strides instead of hardcoded
+                attention_weight=0.1
             )
             
             # Backward pass
@@ -354,34 +256,45 @@ def train(train_dir: pathlib.Path, val_dir: pathlib.Path, writer, resume_ckpt_pa
             
             optimizer.step()
             
-            # Track losses
+            # ✅ FIX: Track ALL losses including attention
             epoch_losses.append(total_loss.item())
             epoch_cls_losses.append(cls_loss.item())
             epoch_cen_losses.append(cen_loss.item())
             epoch_reg_losses.append(reg_loss.item())
-            
+            epoch_att_losses.append(att_loss.item())  # ✅ ADD: Track attention loss
         
         # Update learning rate
         scheduler.step()
         
-        # Log epoch statistics
+        # ✅ FIX: Calculate ALL average losses including attention
         avg_loss = np.mean(epoch_losses)
         avg_cls_loss = np.mean(epoch_cls_losses)
         avg_cen_loss = np.mean(epoch_cen_losses)
         avg_reg_loss = np.mean(epoch_reg_losses)
+        avg_att_loss = np.mean(epoch_att_losses)  # ✅ ADD: Calculate average attention loss
         
+        # ✅ FIX: Log ALL losses including attention
         print(f"Epoch {epoch} completed:")
         print(f"  Avg Total Loss: {avg_loss:.4f}")
         print(f"  Avg Cls Loss: {avg_cls_loss:.4f}")
         print(f"  Avg Cen Loss: {avg_cen_loss:.4f}")
         print(f"  Avg Reg Loss: {avg_reg_loss:.4f}")
+        print(f"  Avg Att Loss: {avg_att_loss:.4f}")  # ✅ ADD: Log attention loss
+        
+        # ✅ ADD: Log to tensorboard if writer is available
+        if writer:
+            writer.add_scalar('Train/Total_Loss', avg_loss, epoch)
+            writer.add_scalar('Train/Classification_Loss', avg_cls_loss, epoch)
+            writer.add_scalar('Train/Centerness_Loss', avg_cen_loss, epoch)
+            writer.add_scalar('Train/Regression_Loss', avg_reg_loss, epoch)
+            writer.add_scalar('Train/Attention_Loss', avg_att_loss, epoch)
         
         # Validation phase
-        if epoch % 5 == 0:  # Validate every 5 epochs
+        if epoch % 5 == 0:
             model.eval()
             with torch.no_grad():
                 for i, (x, class_labels, box_labels) in enumerate(val_loader):
-                    if i >= 5:  # Only validate on first 5 images
+                    if i >= 5:
                         break
                         
                     x = x.to(device)
@@ -393,7 +306,7 @@ def train(train_dir: pathlib.Path, val_dir: pathlib.Path, writer, resume_ckpt_pa
                         H, W, cls_pred, cen_pred, box_pred, model.scales, model.strides
                     )
                     
-                    if i == 0:  # Visualize first validation image
+                    if i == 0:
                         img_vis = tensor_to_image(x[0])
                         img_with_dets = render_detections_to_image(img_vis.copy(), detections[0])
                         img_with_targets = _render_targets_to_image(img_vis.copy(), box_labels[0])
@@ -401,7 +314,7 @@ def train(train_dir: pathlib.Path, val_dir: pathlib.Path, writer, resume_ckpt_pa
                         print(f"Validation image 0: {len(detections[0])} detections, "
                                    f"{len(box_labels[0])} ground truth boxes")
 
-        # Save checkpoint every 3 epochs
+        # Save checkpoint
         if epoch % 10 == 0 or epoch == NUM_EPOCHS:
             ckpt_path = os.path.join(writer.log_dir, f"fcos_epoch{epoch}.pth")
             torch.save({
@@ -414,7 +327,8 @@ def train(train_dir: pathlib.Path, val_dir: pathlib.Path, writer, resume_ckpt_pa
                     'total': avg_loss,
                     'classification': avg_cls_loss,
                     'centerness': avg_cen_loss,
-                    'regression': avg_reg_loss
+                    'regression': avg_reg_loss,
+                    'attention': avg_att_loss  
                 }
             }, ckpt_path)
             logger.info(f"Saved checkpoint {ckpt_path}")

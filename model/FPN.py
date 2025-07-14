@@ -4,6 +4,8 @@ import torch.nn.functional as F
 import math
 from typing import List, Tuple
 import numpy as np
+
+from Attention import CBAM , SE_Attention
 # Braille character classes
 BRAILLE_CLASSES = [
     "BACKGROUND",
@@ -24,23 +26,13 @@ def _upsample(x: torch.Tensor, size) -> torch.Tensor:
     return F.interpolate(x, size=size, mode="bilinear", align_corners=False)
 
 
-
 class FocalLoss(nn.Module):
     """
     Focal Loss for addressing class imbalance in multi-class classification.
     Supports manual alpha weights or automatic inverse-frequency weighting.
     """
     def __init__(self, alpha=None, gamma=2.0,num_classes=27, reduction='mean'):
-        """
-        Args:
-            alpha (list, np.ndarray, torch.Tensor, or float, optional): 
-                - Manual weights for each class (length = num_classes).
-                - If None, no alpha weighting is applied.
-                - If "auto", alpha weights are calculated from class frequencies.
-            gamma (float): Focusing parameter to down-weight easy samples.
-            num_classes (int): Number of classes (required if alpha="auto").
-            reduction (str): Reduction method ('mean', 'sum', or 'none').
-        """
+       
         super().__init__()
         self.gamma = gamma
         self.reduction = reduction
@@ -57,11 +49,7 @@ class FocalLoss(nn.Module):
             self.alpha = alpha  # Scalar or None
 
     def forward(self, inputs, targets):
-        """
-        Args:
-            inputs: Model outputs (logits) with shape (N, C, H, W) or (N, C).
-            targets: Ground truth labels with shape (N, H, W) or (N).
-        """
+        
         # Flatten inputs and targets for cross_entropy
         ce_loss = F.cross_entropy(inputs, targets, reduction='none')
         pt = torch.exp(-ce_loss)  # Probability of true class
@@ -102,8 +90,9 @@ class FocalLoss(nn.Module):
             total_samples += len(valid_labels)
 
         # Compute weights (same as before)
-        class_weights = total_samples / (num_classes * class_counts)
-        class_weights = torch.clamp(class_weights, max=3.0)
+        class_weights = total_samples / (num_classes * (class_counts + 1e-6))
+        class_weights = torch.log(class_weights + 1.0)
+        class_weights = torch.clamp(class_weights, min=0.1, max=3.0)
         self.alpha = class_weights
         print(f"Auto-calculated alpha weights: {self.alpha}")
 
@@ -112,40 +101,38 @@ class FPN(nn.Module):
     Optimized FPN for small Braille character detection
     """
     
-    def __init__(self, num_classes=None):
+    def __init__(self, num_classes=27):
         super(FPN, self).__init__()
         
         from BackBone import BackBone
-        self.backbone = BackBone(pretrained=True)
+        self.backbone = BackBone()
         
         if num_classes is None:
             num_classes = len(BRAILLE_CLASSES)
         
-        from CBAM import CBAM
+        self.attention_maps = []
         
         self.num_classes = num_classes
         
         # FIXED: Consistent configuration for 5 levels
-        self.strides = [4, 8, 16, 32, 64]
-        self.scales = nn.Parameter(torch.tensor([8.0, 6.0, 4.0, 2.5, 1.5]))
+        self.strides = [2, 4, 8, 16, 32]
+        self.scales = nn.Parameter(torch.tensor([8.0, 6.0, 4.0, 2.5, 2.0]))
 
-
-        
-        # FIXED: 5 CBAM modules for 5 FPN levels
-        self.fpn_cbam12 = nn.ModuleList([
-            CBAM(256, reduction=4) for _ in range(5)  # P2, P3, P4, P5, P6
-        ])
         
         self.fpn_cbam = nn.ModuleList([
-            CBAM(256, reduction=8) for _ in range(5)  # P2, P3, P4, P5, P6
+            CBAM(256, reduction=8) for _ in range(5)  
+        ])
+        
+        self.fpn_se = nn.ModuleList([
+            SE_Attention(256, reduction=8) for _ in range(5)  
         ])
         
         # Lateral connections for ResNet-50 channels
         self.lateral_convs = nn.ModuleList([
-            self._make_lateral_conv(256, 256),   # C2 -> P2
-            self._make_lateral_conv(512, 256),   # C3 -> P3
-            self._make_lateral_conv(1024, 256),  # C4 -> P4  
-            self._make_lateral_conv(2048, 256),  # C5 -> P5
+            self._make_lateral_conv(64, 256),   # C2 -> P2
+            self._make_lateral_conv(128, 256),   # C3 -> P3
+            self._make_lateral_conv(256, 256),  # C4 -> P4  
+            self._make_lateral_conv(512, 256),  # C5 -> P5
         ])
         
         # Extra FPN level
@@ -153,12 +140,9 @@ class FPN(nn.Module):
             ConvNorm(256, 256, stride=2),  # P5 -> P6
         ])
         
-        # REMOVED: Unused p1_conv
         
         # Enhanced detection heads
         self.classification_head = nn.Sequential(
-            ConvNorm(256, 256),
-            nn.ReLU(inplace=True),
             ConvNorm(256, 256),
             nn.ReLU(inplace=True),
             ConvNorm(256, 256),
@@ -173,8 +157,6 @@ class FPN(nn.Module):
         
         # Regression head
         self.regression_head = nn.Sequential(
-            ConvNorm(256, 256),
-            nn.ReLU(inplace=True),
             ConvNorm(256, 256),
             nn.ReLU(inplace=True),
             ConvNorm(256, 256),
@@ -224,20 +206,26 @@ class FPN(nn.Module):
         
         # Build FPN pyramid
         p5 = self.lateral_convs[3](c5)
+        ap5 = self.fpn_cbam[3](p5)
+        p5= p5+ap5
         p4 = self.lateral_convs[2](c4) + _upsample(p5, c4.shape[2:])
+        ap4 = self.fpn_cbam[2](p4)
+        p4 = p4 + ap4
         p3 = self.lateral_convs[1](c3) + _upsample(p4, c3.shape[2:])
+        ap3 = self.fpn_cbam[1](p3)
+        p3 = p3 + ap3
         p2 = self.lateral_convs[0](c2) + _upsample(p3, c2.shape[2:])
         
-        # FIXED: Apply CBAM to all levels including P6
-        p2 = self.fpn_cbam12[0](p2)  # Fine details
-        p3 = self.fpn_cbam12[1](p3)  # Main Braille level
-        p4 = self.fpn_cbam[2](p4)  # Larger characters
-        p5 = self.fpn_cbam[3](p5)  # Character groups
-        
+        p2 = self.lateral_convs[0](c2) + _upsample(p3, c2.shape[2:])
+        ap2 = self.fpn_cbam[0](p2)
+        p2 = p2 + ap2
+        spatial_attention = torch.mean(ap5, dim=1)  # Average across channels
+        self.attention_maps.append(spatial_attention)
         # Add P6 level with CBAM
         p6 = self.extra_convs[0](p5)
-        p6 = self.fpn_cbam[4](p6)  # FIXED: Apply CBAM to P6
-        
+        ap6 = self.fpn_se[4](p6)  
+        p6 = p6 + ap6
+
         # All 5 FPN levels
         fpn_features = [p2, p3, p4, p5, p6]
         
@@ -252,7 +240,7 @@ class FPN(nn.Module):
             classes = self.classification_to_class(cls_features)
             centerness = torch.sigmoid(self.classification_to_centerness(cls_features))
             
-            # FIXED: Regression branch without torch.exp
+            # FIXED: Regression branch without 
             reg_features = self.regression_head(fpn_feature)
             bbox_pred = torch.exp(self.regression_to_bbox(reg_features)) * scale
             

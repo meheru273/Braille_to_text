@@ -10,12 +10,11 @@ def generate_targets(img_shape, class_labels_by_batch, box_labels_by_batch, stri
     box_targets = []
     
     # Use original FCOS size ranges
-    size_ranges = [ (0, 64), (32, 128), (64, 256), (128, 512), (256, float('inf'))]
+    size_ranges = [ (0, 32), (16, 64), (32, 128), (64, 256), (128, float('inf'))]
     
     for level_idx, stride in enumerate(strides):
         feat_h, feat_w = img_h // stride, img_w // stride
-        min_size, max_size = size_ranges[level_idx]
-    
+        
         cls_target = torch.zeros((batch_size, feat_h, feat_w), dtype=torch.long)
         cen_target = torch.zeros((batch_size, feat_h, feat_w), dtype=torch.float32)
         box_target = torch.zeros((batch_size, feat_h, feat_w, 4), dtype=torch.float32)
@@ -73,3 +72,37 @@ def generate_targets(img_shape, class_labels_by_batch, box_labels_by_batch, stri
         box_targets.append(box_target)
     
     return class_targets, centerness_targets, box_targets
+
+
+def generate_attention_targets(img_shape, box_labels_by_batch, strides):
+    """
+    Simple attention targets - just binary masks showing where objects are
+    """
+    batch_size, _, img_h, img_w = img_shape
+    attention_targets = []
+    
+    for stride in strides:
+        feat_h, feat_w = img_h // stride, img_w // stride
+        
+        # Create binary attention target (0 = background, 1 = object region)
+        attention_target = torch.zeros((batch_size, feat_h, feat_w), dtype=torch.float32)
+        
+        for batch_idx, boxes in enumerate(box_labels_by_batch):
+            if len(boxes) == 0:
+                continue
+                
+            for box in boxes:
+                x1, y1, x2, y2 = box
+                
+                # Find feature map locations inside this box (same as your logic)
+                feat_x1 = max(0, int(x1 / stride))
+                feat_y1 = max(0, int(y1 / stride))
+                feat_x2 = min(feat_w, int(x2 / stride) + 1)
+                feat_y2 = min(feat_h, int(y2 / stride) + 1)
+                
+                # Simply mark this region as 1 (object present)
+                attention_target[batch_idx, feat_y1:feat_y2, feat_x1:feat_x2] = 1.0
+        
+        attention_targets.append(attention_target)
+    
+    return attention_targets
