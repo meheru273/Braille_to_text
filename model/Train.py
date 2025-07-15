@@ -194,9 +194,31 @@ def train(train_dir: pathlib.Path, val_dir: pathlib.Path, writer, resume_ckpt_pa
     # Learning rate scheduler
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=NUM_EPOCHS)
     start_epoch = 1
+    
+    # ✅ FIXED: Complete checkpoint loading logic
     if resume_ckpt_path is not None and os.path.isfile(resume_ckpt_path):
         print(f"Loading checkpoint from {resume_ckpt_path}")
         checkpoint = torch.load(resume_ckpt_path, map_location=device, weights_only=False)
+        
+        # Load model state
+        model.load_state_dict(checkpoint['model_state'])
+        print(f"✅ Model state loaded from epoch {checkpoint['epoch']}")
+        
+        # Load optimizer state
+        optimizer.load_state_dict(checkpoint['optimizer_state'])
+        print(f"✅ Optimizer state loaded")
+        
+        # Load scheduler state
+        scheduler.load_state_dict(checkpoint['scheduler_state'])
+        print(f"✅ Scheduler state loaded")
+        
+        # ✅ CRITICAL: Set start_epoch to resume from next epoch
+        start_epoch = checkpoint['epoch'] + 1
+        print(f"✅ Training will resume from epoch {start_epoch}")
+        
+        logger.info(f"Resuming training from epoch {start_epoch}")
+    else:
+        print("Starting training from scratch")
         
     focal_loss = FocalLoss(alpha="auto", gamma=2.0, num_classes=num_classes, reduction='mean')
     focal_loss.calculate_auto_alpha(train_dataset) 
@@ -212,7 +234,7 @@ def train(train_dir: pathlib.Path, val_dir: pathlib.Path, writer, resume_ckpt_pa
         epoch_cls_losses = []
         epoch_cen_losses = []
         epoch_reg_losses = []
-        epoch_att_losses = []  # ✅ ADD: Track attention losses
+        epoch_att_losses = []
         
         for batch_idx, (x, class_labels, box_labels) in enumerate(train_loader):
             optimizer.zero_grad()
@@ -233,59 +255,54 @@ def train(train_dir: pathlib.Path, val_dir: pathlib.Path, writer, resume_ckpt_pa
                 cls_pred, cen_pred, box_pred,
                 class_t, cen_t, box_t,
                 focal_loss,
-                attention_maps=model.attention_maps,           # already detached
+                attention_maps=model.attention_maps,
                 box_labels_by_batch=box_labels,
                 img_shape=x.shape,
                 strides=model.strides,
                 attention_weight=0.1)
 
-            total_loss.backward()          # ← exactly once
-            optimizer.step()
-
-            # store **only scalars**
-            epoch_losses.append(total_loss.item())
-            epoch_cls_losses.append(cls_loss.item())
-            epoch_cen_losses.append(cen_loss.item())
-            epoch_reg_losses.append(reg_loss.item())
-            epoch_att_losses.append(att_loss.item())  # ✅ ADD: Track attention loss
-
-            # Gradient clipping for stability
+            # ✅ FIXED: Proper gradient handling
+            total_loss.backward()
+            
+            # ✅ FIXED: Gradient clipping BEFORE optimizer step
             torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=10.0)
             
+            # ✅ FIXED: Single optimizer step
             optimizer.step()
-            
-            # ✅ FIX: Track ALL losses including attention
+
+            # ✅ FIXED: Track losses only once
             epoch_losses.append(total_loss.item())
             epoch_cls_losses.append(cls_loss.item())
             epoch_cen_losses.append(cen_loss.item())
             epoch_reg_losses.append(reg_loss.item())
-            epoch_att_losses.append(att_loss.item())  # ✅ ADD: Track attention loss
+            epoch_att_losses.append(att_loss.item())
         
         # Update learning rate
         scheduler.step()
         
-        # ✅ FIX: Calculate ALL average losses including attention
+        # Calculate average losses
         avg_loss = np.mean(epoch_losses)
         avg_cls_loss = np.mean(epoch_cls_losses)
         avg_cen_loss = np.mean(epoch_cen_losses)
         avg_reg_loss = np.mean(epoch_reg_losses)
-        avg_att_loss = np.mean(epoch_att_losses)  # ✅ ADD: Calculate average attention loss
+        avg_att_loss = np.mean(epoch_att_losses)
         
-        # ✅ FIX: Log ALL losses including attention
+        # Log losses
         print(f"Epoch {epoch} completed:")
         print(f"  Avg Total Loss: {avg_loss:.4f}")
         print(f"  Avg Cls Loss: {avg_cls_loss:.4f}")
         print(f"  Avg Cen Loss: {avg_cen_loss:.4f}")
         print(f"  Avg Reg Loss: {avg_reg_loss:.4f}")
-        print(f"  Avg Att Loss: {avg_att_loss:.4f}")  # ✅ ADD: Log attention loss
+        print(f"  Avg Att Loss: {avg_att_loss:.4f}")
         
-        # ✅ ADD: Log to tensorboard if writer is available
+        # Log to tensorboard
         if writer:
             writer.add_scalar('Train/Total_Loss', avg_loss, epoch)
             writer.add_scalar('Train/Classification_Loss', avg_cls_loss, epoch)
             writer.add_scalar('Train/Centerness_Loss', avg_cen_loss, epoch)
             writer.add_scalar('Train/Regression_Loss', avg_reg_loss, epoch)
             writer.add_scalar('Train/Attention_Loss', avg_att_loss, epoch)
+            writer.add_scalar('Train/Learning_Rate', scheduler.get_last_lr()[0], epoch)
         
         # Validation phase
         if epoch % 5 == 0:
@@ -303,33 +320,40 @@ def train(train_dir: pathlib.Path, val_dir: pathlib.Path, writer, resume_ckpt_pa
                     detections = detections_from_network_output(
                         H, W, cls_pred, cen_pred, box_pred, model.scales, model.strides
                     )
-                    
-                    if i == 0:
-                        img_vis = tensor_to_image(x[0])
-                        img_with_dets = render_detections_to_image(img_vis.copy(), detections[0])
-                        img_with_targets = _render_targets_to_image(img_vis.copy(), box_labels[0])
-                        
-                        print(f"Validation image 0: {len(detections[0])} detections, "
-                                   f"{len(box_labels[0])} ground truth boxes")
+                         
+                    print(f"Validation image 0: {len(detections[0])} detections, "
+                              f"{len(box_labels[0])} ground truth boxes")
 
-        # Save checkpoint
+        
         if epoch % 10 == 0 or epoch == NUM_EPOCHS:
-            ckpt_path = os.path.join(writer.log_dir, f"fcos_epoch{epoch}.pth")
+            # Create checkpoint directory if it doesn't exist
+            checkpoint_dir = os.path.join(writer.log_dir, "checkpoints")
+            os.makedirs(checkpoint_dir, exist_ok=True)
+            
+            ckpt_path = os.path.join(checkpoint_dir, f"fcos_epoch{epoch}.pth")
             torch.save({
                 'model_state': model.state_dict(),
                 'optimizer_state': optimizer.state_dict(),
                 'scheduler_state': scheduler.state_dict(),
                 'epoch': epoch,
                 'class_names': class_names,
+                'num_classes': num_classes,
                 'losses': {
                     'total': avg_loss,
                     'classification': avg_cls_loss,
                     'centerness': avg_cen_loss,
                     'regression': avg_reg_loss,
-                    'attention': avg_att_loss  
+                    'attention': avg_att_loss
+                },
+                'hyperparameters': {
+                    'batch_size': BATCH_SIZE,
+                    'image_size': IMAGE_SIZE,
+                    'base_lr': BASE_LR,
+                    'num_epochs': NUM_EPOCHS
                 }
             }, ckpt_path)
             logger.info(f"Saved checkpoint {ckpt_path}")
+            print(f"Checkpoint saved: {ckpt_path}")
 
     logger.info("Training completed!")
 
