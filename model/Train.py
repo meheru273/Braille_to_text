@@ -159,11 +159,6 @@ def train(train_dir: pathlib.Path, val_dir: pathlib.Path, writer, resume_ckpt_pa
     BASE_LR = 1e-4
     NUM_EPOCHS = 50
     
-    # Loss weights
-    CLASSIFICATION_WEIGHT = 2.0
-    CENTERNESS_WEIGHT = 1.0
-    REGRESSION_WEIGHT = 2.0
-    
     # Ensure paths exist
     train_dir = pathlib.Path(train_dir)
     val_dir = pathlib.Path(val_dir)
@@ -199,6 +194,9 @@ def train(train_dir: pathlib.Path, val_dir: pathlib.Path, writer, resume_ckpt_pa
     # Learning rate scheduler
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=NUM_EPOCHS)
     start_epoch = 1
+    if resume_ckpt_path is not None and os.path.isfile(resume_ckpt_path):
+        print(f"Loading checkpoint from {resume_ckpt_path}")
+        checkpoint = torch.load(resume_ckpt_path, map_location=device, weights_only=False)
         
     focal_loss = FocalLoss(alpha="auto", gamma=2.0, num_classes=num_classes, reduction='mean')
     focal_loss.calculate_auto_alpha(train_dataset) 

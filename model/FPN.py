@@ -114,8 +114,8 @@ class FPN(nn.Module):
         self.num_classes = num_classes
         
         # FIXED: Consistent configuration for 5 levels
-        self.strides = [2, 4, 8, 16, 32]
-        self.scales = nn.Parameter(torch.tensor([8.0, 6.0, 4.0, 2.5, 2.0]))
+        self.strides = [2,4, 8, 16, 32]
+        self.scales = nn.Parameter(torch.tensor([8.0,6.0, 4.0, 2.5, 2.0]))
 
         
         self.fpn_cbam = nn.ModuleList([
@@ -244,7 +244,7 @@ class FPN(nn.Module):
             classes = self.classification_to_class(cls_features)
             centerness = torch.sigmoid(self.classification_to_centerness(cls_features))
             
-            # FIXED: Regression branch without 
+            # FIXED: Regression branch 
             reg_features = self.regression_head(fpn_feature)
             bbox_pred = torch.exp(self.regression_to_bbox(reg_features)) * scale
             
