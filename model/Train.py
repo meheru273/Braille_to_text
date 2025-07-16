@@ -109,8 +109,41 @@ class COCOData(Dataset):
         return ['__background__'] + [c['name'] for c in cats]
 
 def collate_fn(batch):
-    imgs, lbls, bxs = zip(*batch)
-    return torch.stack(imgs), list(lbls), list(bxs)
+    """
+    Custom collate function for object detection with variable-sized annotations
+    """
+    images = []
+    class_labels = []
+    box_labels = []
+    
+    for sample in batch:
+        if len(sample) == 3:  # (image, class_labels, box_labels)
+            img, cls_lbl, box_lbl = sample
+            
+            # Ensure image is a proper tensor, not a view
+            if isinstance(img, torch.Tensor):
+                img = img.clone()
+            
+            images.append(img)
+            class_labels.append(cls_lbl)
+            box_labels.append(box_lbl)
+        else:
+            print(f"Warning: Unexpected sample structure: {len(sample)} elements")
+            continue
+    
+    # Stack images if they all have the same shape
+    try:
+        if len(images) > 0 and all(img.shape == images[0].shape for img in images):
+            images = torch.stack(images, dim=0)
+        else:
+            # Keep as list if shapes differ
+            pass
+    except Exception as e:
+        print(f"Warning: Could not stack images: {e}")
+        # Keep as list
+    
+    return images, class_labels, box_labels
+
 
 
 def tensor_to_image(tensor):
