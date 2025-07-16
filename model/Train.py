@@ -169,14 +169,12 @@ def train(train_dir: pathlib.Path, val_dir: pathlib.Path, writer, resume_ckpt_pa
     # Data loaders
     train_loader = DataLoader(
     train_dataset,
-    batch_size=32,  # Large batch size for fewer iterations
+    batch_size=BATCH_SIZE,
     shuffle=True,
-    num_workers=2,  # Low workers to prevent CPU overload
+    num_workers=2,  # Reduce workers to avoid multiprocessing issues
     pin_memory=True,
     persistent_workers=True,
-    prefetch_factor=1,  # Minimal prefetch
-    drop_last=True,
-    multiprocessing_context='spawn'  # More efficient on some systems
+    collate_fn=collate_fn  # Use the custom collate function
 )
     val_loader = DataLoader(val_dataset, batch_size=1, shuffle=False,
                             num_workers=4, collate_fn=collate_fn,prefetch_factor=8)
