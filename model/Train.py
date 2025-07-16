@@ -176,10 +176,11 @@ def train(train_dir: pathlib.Path, val_dir: pathlib.Path, writer, resume_ckpt_pa
     class_names = train_dataset.get_class_names()
 
     # Data loaders
+    cpu_count = os.cpu_count()
     train_loader = DataLoader(train_dataset, batch_size=BATCH_SIZE, shuffle=True,
-                              num_workers=2, collate_fn=collate_fn)
+                              num_workers=min(8, cpu_count), collate_fn=collate_fn)
     val_loader = DataLoader(val_dataset, batch_size=1, shuffle=False,
-                            num_workers=2, collate_fn=collate_fn)
+                            num_workers=min(8, cpu_count), collate_fn=collate_fn)
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     logger.info(f"Using device: {device}")
