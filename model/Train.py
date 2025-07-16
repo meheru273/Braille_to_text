@@ -178,7 +178,7 @@ def train(train_dir: pathlib.Path, val_dir: pathlib.Path, writer, resume_ckpt_pa
     Enhanced training function with resume capability and fixed attention loss tracking
     """
     # Training hyperparameters optimized for small Braille characters
-    BATCH_SIZE = 16
+    BATCH_SIZE = 8
     IMAGE_SIZE = (800,1200)
     BASE_LR = 1e-4
     NUM_EPOCHS = 50
