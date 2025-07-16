@@ -122,8 +122,6 @@ class FPN(nn.Module):
             CBAM(256, reduction=8) for _ in range(5)  
         ])
 
-        
-
         # Lateral connections for ResNet-50 channels
         self.lateral_convs = nn.ModuleList([
             self._make_lateral_conv(64, 256),   

@@ -19,7 +19,7 @@ from Targets import generate_targets
 logger = logging.getLogger(__name__)
 
 from loss import _compute_loss, compute_attention_loss
-
+import time
 class COCOData(Dataset):
     """
     Enhanced COCO dataset with proper preprocessing for Braille detection
@@ -216,7 +216,8 @@ def train(train_dir: pathlib.Path, val_dir: pathlib.Path, writer, resume_ckpt_pa
     optimizer = create_optimizer(model, BASE_LR)
     
     # Learning rate scheduler
-    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=NUM_EPOCHS)
+    if resume_ckpt_path is not None and os.path.isfile(resume_ckpt_path):
+        scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=NUM_EPOCHS)
     start_epoch = 1
     
     # ✅ FIXED: Complete checkpoint loading logic
@@ -349,7 +350,7 @@ def train(train_dir: pathlib.Path, val_dir: pathlib.Path, writer, resume_ckpt_pa
                               f"{len(box_labels[0])} ground truth boxes")
 
         
-        if epoch % 10 == 0 or epoch == NUM_EPOCHS:
+        if epoch % 5 == 0 or epoch == NUM_EPOCHS:
             # Create checkpoint directory if it doesn't exist
             checkpoint_dir = os.path.join(writer.log_dir, "checkpoints")
             os.makedirs(checkpoint_dir, exist_ok=True)
@@ -379,6 +380,14 @@ def train(train_dir: pathlib.Path, val_dir: pathlib.Path, writer, resume_ckpt_pa
             logger.info(f"Saved checkpoint {ckpt_path}")
             print(f"Checkpoint saved: {ckpt_path}")
 
+        persistent_path = "/kaggle/working/latest_checkpoint.pth"
+        torch.save({
+        'model_state': model.state_dict(),
+        'optimizer_state': optimizer.state_dict(),
+        'scheduler_state': scheduler.state_dict(),
+        'epoch': epoch,
+        'timestamp': time.time()
+    }, persistent_path)
     logger.info("Training completed!")
 
 
