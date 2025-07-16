@@ -61,6 +61,7 @@ class COCOData(Dataset):
         img_path = self.images_dir / info['file_name']
         if not img_path.exists():
             raise FileNotFoundError(f"Image file not found: {img_path}")
+        
         # Load and letterbox image
         img = Image.open(img_path).convert("RGB")
         orig_w, orig_h = info['width'], info['height']
@@ -98,7 +99,7 @@ class COCOData(Dataset):
         if boxes:
             return img_tensor, torch.tensor(labels, dtype=torch.long), torch.tensor(boxes, dtype=torch.float32)
         return img_tensor, torch.zeros((0,), dtype=torch.long), torch.zeros((0,4), dtype=torch.float32)
-    
+        
     def get_num_classes(self):
         return self.num_classes
 
@@ -119,16 +120,6 @@ def tensor_to_image(tensor):
     return img
 
 
-
-def _render_targets_to_image(img: np.ndarray, box_labels: torch.Tensor):
-    """Render ground truth boxes on image"""
-    img = np.ascontiguousarray(img, dtype=np.uint8)
-    for i in range(box_labels.shape[0]):
-        x1, y1, x2, y2 = box_labels[i].tolist()
-        pt1 = (int(round(x1)), int(round(y1)))
-        pt2 = (int(round(x2)), int(round(y2)))
-        cv2.rectangle(img, pt1, pt2, (255, 0, 0), 1)
-    return img
 
 def create_optimizer(model, base_lr=1e-4):
     """Create optimizer with different learning rates for backbone and new layers"""
@@ -154,7 +145,7 @@ def train(train_dir: pathlib.Path, val_dir: pathlib.Path, writer, resume_ckpt_pa
     Enhanced training function with resume capability and fixed attention loss tracking
     """
     # Training hyperparameters optimized for small Braille characters
-    BATCH_SIZE = 2
+    BATCH_SIZE = 8
     IMAGE_SIZE = (800,1200)
     BASE_LR = 1e-4
     NUM_EPOCHS = 50
@@ -178,12 +169,13 @@ def train(train_dir: pathlib.Path, val_dir: pathlib.Path, writer, resume_ckpt_pa
     # Data loaders
     cpu_count = os.cpu_count()
     train_loader = DataLoader(train_dataset, batch_size=BATCH_SIZE, shuffle=True,
-                              num_workers=min(8, cpu_count), collate_fn=collate_fn)
+                              num_workers=min(20, cpu_count), collate_fn=collate_fn,prefetch_factor=8,pin_memory=True,
+        persistent_workers=True,)
     val_loader = DataLoader(val_dataset, batch_size=1, shuffle=False,
-                            num_workers=min(8, cpu_count), collate_fn=collate_fn)
+                            num_workers=min(20, cpu_count), collate_fn=collate_fn,prefetch_factor=8)
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    logger.info(f"Using device: {device}")
+    print(f"Using device: {device}")
 
     print("Creating model with pretrained backbone...")
     model = FPN(num_classes=num_classes)
