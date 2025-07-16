@@ -178,7 +178,7 @@ def train(train_dir: pathlib.Path, val_dir: pathlib.Path, writer, resume_ckpt_pa
     Enhanced training function with resume capability and fixed attention loss tracking
     """
     # Training hyperparameters optimized for small Braille characters
-    BATCH_SIZE = 32
+    BATCH_SIZE = 16
     IMAGE_SIZE = (800,1200)
     BASE_LR = 1e-4
     NUM_EPOCHS = 50
@@ -200,15 +200,8 @@ def train(train_dir: pathlib.Path, val_dir: pathlib.Path, writer, resume_ckpt_pa
     class_names = train_dataset.get_class_names()
 
     # Data loaders
-    train_loader = DataLoader(
-    train_dataset,
-    batch_size=BATCH_SIZE,
-    shuffle=True,
-    num_workers=2,  # Reduce workers to avoid multiprocessing issues
-    pin_memory=True,
-    persistent_workers=True,
-    collate_fn=collate_fn  # Use the custom collate function
-)
+    train_loader = DataLoader(train_dataset,batch_size=BATCH_SIZE,shuffle=True,num_workers=2,  # Reduce workers to avoid multiprocessing issues
+                            pin_memory=True,persistent_workers=True, collate_fn=collate_fn )
     val_loader = DataLoader(val_dataset, batch_size=1, shuffle=False,
                             num_workers=4, collate_fn=collate_fn,prefetch_factor=8)
 
