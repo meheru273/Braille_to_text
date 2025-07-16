@@ -145,7 +145,7 @@ def train(train_dir: pathlib.Path, val_dir: pathlib.Path, writer, resume_ckpt_pa
     Enhanced training function with resume capability and fixed attention loss tracking
     """
     # Training hyperparameters optimized for small Braille characters
-    BATCH_SIZE = 8
+    BATCH_SIZE = 32
     IMAGE_SIZE = (800,1200)
     BASE_LR = 1e-4
     NUM_EPOCHS = 50
@@ -167,12 +167,19 @@ def train(train_dir: pathlib.Path, val_dir: pathlib.Path, writer, resume_ckpt_pa
     class_names = train_dataset.get_class_names()
 
     # Data loaders
-    cpu_count = os.cpu_count()
-    train_loader = DataLoader(train_dataset, batch_size=BATCH_SIZE, shuffle=True,
-                              num_workers=min(20, cpu_count), collate_fn=collate_fn,prefetch_factor=8,pin_memory=True,
-        persistent_workers=True,)
+    train_loader = DataLoader(
+    train_dataset,
+    batch_size=64,  # Large batch size for fewer iterations
+    shuffle=True,
+    num_workers=2,  # Low workers to prevent CPU overload
+    pin_memory=True,
+    persistent_workers=True,
+    prefetch_factor=1,  # Minimal prefetch
+    drop_last=True,
+    multiprocessing_context='spawn'  # More efficient on some systems
+)
     val_loader = DataLoader(val_dataset, batch_size=1, shuffle=False,
-                            num_workers=min(20, cpu_count), collate_fn=collate_fn,prefetch_factor=8)
+                            num_workers=4, collate_fn=collate_fn,prefetch_factor=8)
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"Using device: {device}")
