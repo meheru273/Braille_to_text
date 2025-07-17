@@ -70,6 +70,10 @@ def generate_targets(img_shape, class_labels_by_batch, box_labels_by_batch, stri
         class_targets.append(cls_target)
         centerness_targets.append(cen_target)
         box_targets.append(box_target)
+        
+        print(f"Level {level_idx} - Class targets shape: {len(class_targets)}, "
+              f"Centerness targets shape: {len(centerness_targets)}, "
+              f"Box targets shape: {len(box_targets)}")
     
     return class_targets, centerness_targets, box_targets
 
