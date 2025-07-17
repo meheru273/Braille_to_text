@@ -5,6 +5,8 @@ from FPN import FPN
 from inference import compute_detections, render_detections_to_image, tensor_to_image
 from PostProcessing import generate_colors,compute_iou, non_max_suppression,refine_large_boxes,letterbox_image, map_detections_to_original
 
+from torchviz import make_dot
+import torch
 
 def apply_postprocessing_pipeline(detections, confidence_threshold=0.3, nms_threshold=0.3):
     """Apply complete postprocessing pipeline to raw detections"""
@@ -132,7 +134,9 @@ def main():
         cv2.imwrite("detections_postprocessed.jpg", 
                    cv2.cvtColor(img_with_detections, cv2.COLOR_RGB2BGR))
         print("[OK] Saved 'detections_postprocessed.jpg'")
-        
+        dot = make_dot(model, params=dict(model.named_parameters()))
+        dot.render("fpn_architecture", format="png")
+
     except Exception as e:
         print(f"[ERROR] Visualization failed: {e}")
         return

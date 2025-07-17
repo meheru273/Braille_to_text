@@ -46,8 +46,8 @@ class CBAM(nn.Module):
         # Apply channel attention first
         x = self.channel_attention(x)
         # Then apply spatial attention
-        x = self.spatial_attention(x)
-        return x
+        y = self.spatial_attention(x)
+        return y
 
 class SE_Attention(nn.Module):
     def __init__(self, in_channels, reduction=16):
