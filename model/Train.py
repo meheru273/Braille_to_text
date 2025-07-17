@@ -20,130 +20,7 @@ logger = logging.getLogger(__name__)
 
 from loss import _compute_loss, compute_attention_loss
 import time
-class COCOData(Dataset):
-    """
-    Enhanced COCO dataset with proper preprocessing for Braille detection
-    """
-    def __init__(self,
-                 split_dir: pathlib.Path,
-                 image_size=(800, 1200),
-                 min_area=2,
-                 max_detections=None):
-        self.split_dir = pathlib.Path(split_dir)
-        if not self.split_dir.exists():
-            raise FileNotFoundError(f"Folder not found: {self.split_dir}")
-        # Find annotation JSON
-        jsons = list(self.split_dir.glob("*.json"))
-        if not jsons:
-            raise FileNotFoundError(f"No JSON annotation file in {self.split_dir}")
-        ann_file = next((jf for jf in jsons if "annotation" in jf.name.lower()), jsons[0])
-        print(f"Loading COCO annotations from: {ann_file}")
-        self.coco = COCO(str(ann_file))
-        self.images_dir = self.split_dir
-        self.image_ids = list(self.coco.imgs.keys())
-        # Configurable parameters
-        self.image_size = image_size  # (width, height)
-        self.min_area = min_area
-        self.max_detections = max_detections
-
-        # Map original COCO category IDs to contiguous 1..N
-        cats = self.coco.loadCats(self.coco.getCatIds())
-        cats = sorted(cats, key=lambda x: x['id'])
-        self.cat_id_to_contiguous = {cat['id']: i+1 for i, cat in enumerate(cats)}
-        self.num_classes = len(cats) + 1  # +1 for background=0
-
-    def __len__(self):
-        return len(self.image_ids)
-
-    def __getitem__(self, idx):
-        img_id = self.image_ids[idx]
-        info = self.coco.imgs[img_id]
-        img_path = self.images_dir / info['file_name']
-        if not img_path.exists():
-            raise FileNotFoundError(f"Image file not found: {img_path}")
-        
-        # Load and letterbox image
-        img = Image.open(img_path).convert("RGB")
-        orig_w, orig_h = info['width'], info['height']
-        target_w, target_h = self.image_size
-        scale = min(target_w / orig_w, target_h / orig_h)
-        new_w, new_h = int(orig_w * scale), int(orig_h * scale)
-        img_resized = img.resize((new_w, new_h), Image.LANCZOS)
-        letterboxed = Image.new('RGB', (target_w, target_h), (114, 114, 114))
-        paste_x, paste_y = (target_w - new_w) // 2, (target_h - new_h) // 2
-        letterboxed.paste(img_resized, (paste_x, paste_y))
-        img_np = np.array(letterboxed).astype(np.float32) / 255.0
-        img_tensor = torch.from_numpy(img_np.transpose(2,0,1)).float()
-        # Load and transform annotations
-        ann_ids = self.coco.getAnnIds(imgIds=img_id)
-        anns = self.coco.loadAnns(ann_ids)
-        boxes, labels = [], []
-        for ann in anns:
-            x, y, w, h = ann['bbox']
-            if w * h < self.min_area:
-                continue
-            x1, y1, x2, y2 = x, y, x + w, y + h
-            x1n = x1 * scale + paste_x
-            y1n = y1 * scale + paste_y
-            x2n = x2 * scale + paste_x
-            y2n = y2 * scale + paste_y
-            x1n, y1n = max(0, x1n), max(0, y1n)
-            x2n, y2n = min(target_w, x2n), min(target_h, y2n)
-            
-            if x2n > x1n and y2n > y1n:
-                if (x2n - x1n) * (y2n - y1n) >= self.min_area:
-                    boxes.append([x1n, y1n, x2n, y2n])
-                    labels.append(self.cat_id_to_contiguous[ann['category_id']])
-                    if self.max_detections and len(boxes) >= self.max_detections:
-                        break
-        if boxes:
-            return img_tensor, torch.tensor(labels, dtype=torch.long), torch.tensor(boxes, dtype=torch.float32)
-        return img_tensor, torch.zeros((0,), dtype=torch.long), torch.zeros((0,4), dtype=torch.float32)
-        
-    def get_num_classes(self):
-        return self.num_classes
-
-    def get_class_names(self):
-        cats = self.coco.loadCats(self.coco.getCatIds())
-        cats = sorted(cats, key=lambda x: x['id'])
-        return ['__background__'] + [c['name'] for c in cats]
-
-def collate_fn(batch):
-    """
-    Custom collate function for object detection with variable-sized annotations
-    """
-    images = []
-    class_labels = []
-    box_labels = []
-    
-    for sample in batch:
-        if len(sample) == 3:  # (image, class_labels, box_labels)
-            img, cls_lbl, box_lbl = sample
-            
-            # Ensure image is a proper tensor, not a view
-            if isinstance(img, torch.Tensor):
-                img = img.clone()
-            
-            images.append(img)
-            class_labels.append(cls_lbl)
-            box_labels.append(box_lbl)
-        else:
-            print(f"Warning: Unexpected sample structure: {len(sample)} elements")
-            continue
-    
-    # Stack images if they all have the same shape
-    try:
-        if len(images) > 0 and all(img.shape == images[0].shape for img in images):
-            images = torch.stack(images, dim=0)
-        else:
-            # Keep as list if shapes differ
-            pass
-    except Exception as e:
-        print(f"Warning: Could not stack images: {e}")
-        # Keep as list
-    
-    return images, class_labels, box_labels
-
+from Dataset import DSBIData ,COCOData ,collate_fn
 
 
 def tensor_to_image(tensor):
@@ -151,7 +28,6 @@ def tensor_to_image(tensor):
     img = tensor.cpu().numpy().transpose(1, 2, 0)
     img = (img * 255).clip(0, 255).astype(np.uint8)
     return img
-
 
 
 def create_optimizer(model, base_lr=1e-4):
@@ -178,7 +54,7 @@ def train(train_dir: pathlib.Path, val_dir: pathlib.Path, writer, resume_ckpt_pa
     Enhanced training function with resume capability and fixed attention loss tracking
     """
     # Training hyperparameters optimized for small Braille characters
-    BATCH_SIZE = 4
+    BATCH_SIZE = 2
     IMAGE_SIZE = (800,1200)
     BASE_LR = 1e-4
     NUM_EPOCHS = 50
@@ -186,6 +62,7 @@ def train(train_dir: pathlib.Path, val_dir: pathlib.Path, writer, resume_ckpt_pa
     # Ensure paths exist
     train_dir = pathlib.Path(train_dir)
     val_dir = pathlib.Path(val_dir)
+   
     
     if not train_dir.exists():
         raise FileNotFoundError(f"Train directory not found: {train_dir.absolute()}")
@@ -195,20 +72,21 @@ def train(train_dir: pathlib.Path, val_dir: pathlib.Path, writer, resume_ckpt_pa
     print("Creating datasets...")
     train_dataset = COCOData(train_dir, image_size=IMAGE_SIZE, min_area=2)
     val_dataset = COCOData(val_dir, image_size=IMAGE_SIZE, min_area=2)
+    
 
     num_classes = train_dataset.get_num_classes()
     class_names = train_dataset.get_class_names()
 
     # Data loaders
-    train_loader = DataLoader(train_dataset,batch_size=BATCH_SIZE,shuffle=True,num_workers=2,  # Reduce workers to avoid multiprocessing issues
+    train_loader = DataLoader(train_dataset,batch_size=BATCH_SIZE,shuffle=True,num_workers=min(4, os.cpu_count()),  # Reduce workers to avoid multiprocessing issues
                             pin_memory=True,persistent_workers=True, collate_fn=collate_fn )
     val_loader = DataLoader(val_dataset, batch_size=1, shuffle=False,
-                            num_workers=4, collate_fn=collate_fn,prefetch_factor=8)
+                            num_workers=min(4, os.cpu_count()), collate_fn=collate_fn)
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"Using device: {device}")
 
-    print("Creating model with pretrained backbone...")
+    print("Creating model...")
     model = FPN(num_classes=num_classes)
     model.to(device)
     
@@ -220,24 +98,19 @@ def train(train_dir: pathlib.Path, val_dir: pathlib.Path, writer, resume_ckpt_pa
         scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=NUM_EPOCHS)
     start_epoch = 1
     
-    # ✅ FIXED: Complete checkpoint loading logic
+    
     if resume_ckpt_path is not None and os.path.isfile(resume_ckpt_path):
         print(f"Loading checkpoint from {resume_ckpt_path}")
         checkpoint = torch.load(resume_ckpt_path, map_location=device, weights_only=False)
         
         # Load model state
         model.load_state_dict(checkpoint['model_state'])
-        print(f"✅ Model state loaded from epoch {checkpoint['epoch']}")
         
         # Load optimizer state
         optimizer.load_state_dict(checkpoint['optimizer_state'])
-        print(f"✅ Optimizer state loaded")
         
         # Load scheduler state
         scheduler.load_state_dict(checkpoint['scheduler_state'])
-        print(f"✅ Scheduler state loaded")
-        
-        # ✅ CRITICAL: Set start_epoch to resume from next epoch
         start_epoch = checkpoint['epoch'] + 1
         print(f"✅ Training will resume from epoch {start_epoch}")
         
@@ -320,14 +193,6 @@ def train(train_dir: pathlib.Path, val_dir: pathlib.Path, writer, resume_ckpt_pa
         print(f"  Avg Reg Loss: {avg_reg_loss:.4f}")
         print(f"  Avg Att Loss: {avg_att_loss:.4f}")
         
-        # Log to tensorboard
-        if writer:
-            writer.add_scalar('Train/Total_Loss', avg_loss, epoch)
-            writer.add_scalar('Train/Classification_Loss', avg_cls_loss, epoch)
-            writer.add_scalar('Train/Centerness_Loss', avg_cen_loss, epoch)
-            writer.add_scalar('Train/Regression_Loss', avg_reg_loss, epoch)
-            writer.add_scalar('Train/Attention_Loss', avg_att_loss, epoch)
-            writer.add_scalar('Train/Learning_Rate', scheduler.get_last_lr()[0], epoch)
         
         # Validation phase
         if epoch % 5 == 0:
@@ -379,16 +244,6 @@ def train(train_dir: pathlib.Path, val_dir: pathlib.Path, writer, resume_ckpt_pa
             }, ckpt_path)
             logger.info(f"Saved checkpoint {ckpt_path}")
             print(f"Checkpoint saved: {ckpt_path}")
-
-        persistent_path = "/kaggle/working/latest_checkpoint.pth"
-        torch.save({
-        'model_state': model.state_dict(),
-        'optimizer_state': optimizer.state_dict(),
-        'scheduler_state': scheduler.state_dict(),
-        'epoch': epoch,
-        'timestamp': time.time()
-    }, persistent_path)
-    logger.info("Training completed!")
 
 
 # Usage:
