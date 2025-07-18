@@ -90,22 +90,28 @@ class COCOData(Dataset):
         return ['__background__'] + [c['name'] for c in cats]
     
 def collate_fn(batch):
-    """
-    Custom collate function for object detection with variable-sized annotations
-    """
+    """Standard collate function that stacks tensors"""
     images = []
-    class_labels = []
-    box_labels = []
-    try:
-        if len(images) > 0 and all(img.shape == images[0].shape for img in images):
-            images = torch.stack(images, dim=0)
-        else:
-            # Keep as list if shapes differ
-            pass
-    except Exception as e:
-        print(f"Warning: Could not stack images: {e}")
-       
-    return images, class_labels, box_labels
+    labels = []
+    boxes = []
+    
+    max_h = max(img.shape[1] for img, _, _ in batch)
+    max_w = max(img.shape[2] for img, _, _ in batch)
+    
+    for img, label, box in batch:
+        # Pad image to max size
+        h, w = img.shape[1], img.shape[2]
+        padded_img = torch.zeros(3, max_h, max_w)
+        padded_img[:, :h, :w] = img
+        
+        images.append(padded_img)
+        labels.append(label)
+        boxes.append(box)
+    
+    # Stack into tensors
+    images = torch.stack(images)
+    return images, labels, boxes
+
 
 class DSBIData(torch.utils.data.Dataset):
     def __init__(self, root_dir, file_list, transforms=None):

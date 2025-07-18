@@ -81,7 +81,7 @@ def train(train_dir: pathlib.Path, val_dir: pathlib.Path, writer, resume_ckpt_pa
     # Data loaders
     train_loader = DataLoader(train_dataset,batch_size=BATCH_SIZE,num_workers=min(2, os.cpu_count()),  # Reduce workers to avoid multiprocessing issues
                             pin_memory=True,persistent_workers=True, collate_fn=collate_fn )
-    val_loader = DataLoader(val_dataset, batch_size=1,
+    val_loader = DataLoader(val_dataset, batch_size=BATCH_SIZE,
                             num_workers=min(2, os.cpu_count()), collate_fn=collate_fn)
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
