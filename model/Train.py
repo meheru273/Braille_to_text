@@ -20,15 +20,15 @@ logger = logging.getLogger(__name__)
 
 from loss import _compute_loss, compute_attention_loss
 import time
-from Dataset import DSBIData ,COCOData ,collate_fn
+from Dataset import DSBIData, COCOData, collate_fn
 
+from torch.cuda.amp import autocast, GradScaler
 
 def tensor_to_image(tensor):
     """Convert tensor to numpy array for visualization"""
     img = tensor.cpu().numpy().transpose(1, 2, 0)
     img = (img * 255).clip(0, 255).astype(np.uint8)
     return img
-
 
 def create_optimizer(model, base_lr=1e-4):
     """Create optimizer with different learning rates for backbone and new layers"""
@@ -48,21 +48,22 @@ def create_optimizer(model, base_lr=1e-4):
     
     return optimizer
 
-
 def train(train_dir: pathlib.Path, val_dir: pathlib.Path, writer, resume_ckpt_path=None):
     """
-    Enhanced training function with resume capability and fixed attention loss tracking
+    Enhanced training function with mixed precision and resume capability
     """
     # Training hyperparameters optimized for small Braille characters
     BATCH_SIZE = 2
-    IMAGE_SIZE = (800,1200)
+    IMAGE_SIZE = (800, 1200)
     BASE_LR = 1e-4
     NUM_EPOCHS = 50
+    
+    # ✅ FIXED: Initialize GradScaler properly
+    scaler = torch.amp.GradScaler()
     
     # Ensure paths exist
     train_dir = pathlib.Path(train_dir)
     val_dir = pathlib.Path(val_dir)
-   
     
     if not train_dir.exists():
         raise FileNotFoundError(f"Train directory not found: {train_dir.absolute()}")
@@ -73,16 +74,28 @@ def train(train_dir: pathlib.Path, val_dir: pathlib.Path, writer, resume_ckpt_pa
     train_dataset = COCOData(train_dir, image_size=IMAGE_SIZE, min_area=2)
     val_dataset = COCOData(val_dir, image_size=IMAGE_SIZE, min_area=2)
     
-
     num_classes = train_dataset.get_num_classes()
     class_names = train_dataset.get_class_names()
     print("number of classes:", num_classes)
     print("cpu count:", os.cpu_count())
+    
     # Data loaders
-    train_loader = DataLoader(train_dataset,batch_size=BATCH_SIZE,num_workers=min(8, os.cpu_count()),  # Reduce workers to avoid multiprocessing issues
-                            pin_memory=True,persistent_workers=True, collate_fn=collate_fn )
-    val_loader = DataLoader(val_dataset, batch_size=BATCH_SIZE,
-                            num_workers=min(8, os.cpu_count()), collate_fn=collate_fn)
+    train_loader = DataLoader(
+        train_dataset, 
+        batch_size=BATCH_SIZE, 
+        shuffle=True,
+        num_workers=min(8, os.cpu_count()),
+        pin_memory=True, 
+        persistent_workers=True, 
+        collate_fn=collate_fn
+    )
+    val_loader = DataLoader(
+        val_dataset, 
+        batch_size=BATCH_SIZE,
+        shuffle=False,
+        num_workers=min(8, os.cpu_count()), 
+        collate_fn=collate_fn
+    )
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"Using device: {device}")
@@ -94,24 +107,33 @@ def train(train_dir: pathlib.Path, val_dir: pathlib.Path, writer, resume_ckpt_pa
     # Create optimizer with different learning rates
     optimizer = create_optimizer(model, BASE_LR)
     
-    # Learning rate scheduler
-    if resume_ckpt_path is not None and os.path.isfile(resume_ckpt_path):
-        scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=NUM_EPOCHS)
+    # ✅ FIXED: Always create scheduler
+    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=NUM_EPOCHS)
+    
     start_epoch = 1
     
-    
+    # ✅ FIXED: Checkpoint loading with scaler state
     if resume_ckpt_path is not None and os.path.isfile(resume_ckpt_path):
         print(f"Loading checkpoint from {resume_ckpt_path}")
         checkpoint = torch.load(resume_ckpt_path, map_location=device, weights_only=False)
         
         # Load model state
         model.load_state_dict(checkpoint['model_state'])
+        print(f"✅ Model state loaded from epoch {checkpoint['epoch']}")
         
         # Load optimizer state
         optimizer.load_state_dict(checkpoint['optimizer_state'])
+        print(f"✅ Optimizer state loaded")
         
         # Load scheduler state
         scheduler.load_state_dict(checkpoint['scheduler_state'])
+        print(f"✅ Scheduler state loaded")
+        
+        # ✅ FIXED: Load scaler state if available
+        if 'scaler_state' in checkpoint:
+            scaler.load_state_dict(checkpoint['scaler_state'])
+            print(f"✅ Scaler state loaded")
+        
         start_epoch = checkpoint['epoch'] + 1
         print(f"✅ Training will resume from epoch {start_epoch}")
         
@@ -120,7 +142,7 @@ def train(train_dir: pathlib.Path, val_dir: pathlib.Path, writer, resume_ckpt_pa
         print("Starting training from scratch")
         
     focal_loss = FocalLoss(alpha="auto", gamma=2.0, num_classes=num_classes, reduction='mean')
-    focal_loss.calculate_auto_alpha(train_dataset) 
+    focal_loss.calculate_auto_alpha(train_dataset)
 
     print(f"Starting training from epoch {start_epoch} to {NUM_EPOCHS}...")
     
@@ -137,39 +159,43 @@ def train(train_dir: pathlib.Path, val_dir: pathlib.Path, writer, resume_ckpt_pa
         
         for batch_idx, (x, class_labels, box_labels) in enumerate(train_loader):
             optimizer.zero_grad()
-            x = x.to(device)
+            x = x.to(device, non_blocking=True)
             print("batch no :", batch_idx, "of epoch", epoch)
             
-            # Normalize batch
-            batch_norm = normalize_batch(x)
+            # ✅ FIXED: Mixed precision forward pass
+            with torch.amp.autocast():
+                # Normalize batch
+                batch_norm = normalize_batch(x)
+                
+                # Forward pass
+                cls_pred, cen_pred, box_pred = model(batch_norm)
+
+                # Generate targets
+                class_t, cen_t, box_t = generate_targets(
+                    x.shape, class_labels, box_labels, model.strides)
+
+                total_loss, cls_loss, cen_loss, reg_loss, att_loss = _compute_loss(
+                    cls_pred, cen_pred, box_pred,
+                    class_t, cen_t, box_t,
+                    focal_loss,
+                    attention_maps=model.attention_maps,
+                    box_labels_by_batch=box_labels,
+                    img_shape=x.shape,
+                    strides=model.strides,
+                    attention_weight=0.1)
+
+            # ✅ FIXED: Scaled backward pass
+            scaler.scale(total_loss).backward()
             
-            # Forward pass
-            cls_pred, cen_pred, box_pred = model(batch_norm)
-
-            # Generate targets
-            class_t, cen_t, box_t = generate_targets(
-                x.shape, class_labels, box_labels, model.strides)
-
-            total_loss, cls_loss, cen_loss, reg_loss, att_loss = _compute_loss(
-                cls_pred, cen_pred, box_pred,
-                class_t, cen_t, box_t,
-                focal_loss,
-                attention_maps=model.attention_maps,
-                box_labels_by_batch=box_labels,
-                img_shape=x.shape,
-                strides=model.strides,
-                attention_weight=0.1)
-
-            # ✅ FIXED: Proper gradient handling
-            total_loss.backward()
-            
-            # ✅ FIXED: Gradient clipping BEFORE optimizer step
+            # ✅ FIXED: Gradient clipping with scaler
+            scaler.unscale_(optimizer)
             torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=10.0)
             
-            # ✅ FIXED: Single optimizer step
-            optimizer.step()
+            # ✅ FIXED: Scaler step and update
+            scaler.step(optimizer)
+            scaler.update()
 
-            # ✅ FIXED: Track losses only once
+            # Track losses
             epoch_losses.append(total_loss.item())
             epoch_cls_losses.append(cls_loss.item())
             epoch_cen_losses.append(cen_loss.item())
@@ -194,7 +220,6 @@ def train(train_dir: pathlib.Path, val_dir: pathlib.Path, writer, resume_ckpt_pa
         print(f"  Avg Reg Loss: {avg_reg_loss:.4f}")
         print(f"  Avg Att Loss: {avg_att_loss:.4f}")
         
-        
         # Validation phase
         if epoch % 5 == 0:
             model.eval()
@@ -204,28 +229,34 @@ def train(train_dir: pathlib.Path, val_dir: pathlib.Path, writer, resume_ckpt_pa
                         break
                         
                     x = x.to(device)
-                    batch_norm = normalize_batch(x)
-                    cls_pred, cen_pred, box_pred = model(batch_norm)
+                    
+                    # Use autocast for validation too
+                    with torch.amp.autocast():
+                        batch_norm = normalize_batch(x)
+                        cls_pred, cen_pred, box_pred = model(batch_norm)
                     
                     H, W = x.shape[2], x.shape[3]
                     detections = detections_from_network_output(
                         H, W, cls_pred, cen_pred, box_pred, model.scales, model.strides
                     )
                          
-                    print(f"Validation image 0: {len(detections[0])} detections, "
+                    print(f"Validation image {i}: {len(detections[0])} detections, "
                               f"{len(box_labels[0])} ground truth boxes")
 
-        
+        # Save checkpoint
         if epoch % 5 == 0 or epoch == NUM_EPOCHS:
             # Create checkpoint directory if it doesn't exist
             checkpoint_dir = os.path.join(writer.log_dir, "checkpoints")
             os.makedirs(checkpoint_dir, exist_ok=True)
             
             ckpt_path = os.path.join(checkpoint_dir, f"fcos_epoch{epoch}.pth")
+            
+            #FIXED: Save scaler state in checkpoint
             torch.save({
                 'model_state': model.state_dict(),
                 'optimizer_state': optimizer.state_dict(),
                 'scheduler_state': scheduler.state_dict(),
+                'scaler_state': scaler.state_dict(),  # Save scaler state
                 'epoch': epoch,
                 'class_names': class_names,
                 'num_classes': num_classes,
@@ -246,6 +277,7 @@ def train(train_dir: pathlib.Path, val_dir: pathlib.Path, writer, resume_ckpt_pa
             logger.info(f"Saved checkpoint {ckpt_path}")
             print(f"Checkpoint saved: {ckpt_path}")
 
+    logger.info("Training completed!")
 
 # Usage:
 if __name__ == "__main__":
