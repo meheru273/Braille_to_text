@@ -83,7 +83,6 @@ def train(train_dir: pathlib.Path, val_dir: pathlib.Path, writer, resume_ckpt_pa
     train_loader = DataLoader(
         train_dataset, 
         batch_size=BATCH_SIZE, 
-        shuffle=True,
         num_workers=min(8, os.cpu_count()),
         pin_memory=True, 
         persistent_workers=True, 
