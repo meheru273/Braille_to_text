@@ -76,7 +76,7 @@ def train(train_dir: pathlib.Path, val_dir: pathlib.Path, writer, resume_ckpt_pa
 
     num_classes = train_dataset.get_num_classes()
     class_names = train_dataset.get_class_names()
-
+    print("number of classes:", num_classes)
     # Data loaders
     train_loader = DataLoader(train_dataset,batch_size=BATCH_SIZE,shuffle=True,num_workers=min(4, os.cpu_count()),  # Reduce workers to avoid multiprocessing issues
                             pin_memory=True,persistent_workers=True, collate_fn=collate_fn )

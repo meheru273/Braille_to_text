@@ -269,6 +269,7 @@ def evaluate_model(test_dir: pathlib.Path, model_path: pathlib.Path, confidence_
                            collate_fn=collate_fn, num_workers=2)
     
     num_classes = test_dataset.get_num_classes()
+    print("number of classes:", num_classes)
     class_names = test_dataset.get_class_names()
     
     logger.info(f"Test dataset loaded: {len(test_dataset)} images, {num_classes} classes")

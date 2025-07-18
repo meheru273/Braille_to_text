@@ -6,6 +6,8 @@ import numpy as np
 from PIL import Image
 from pycocotools.coco import COCO
 import os 
+EXPECTED_CLASSES = ['a', 'b', 'c', 'd', 'e', 'f', 'g', 'h', 'i', 'j', 'k', 'l', 'm', 
+                   'n', 'o', 'p', 'q', 'r', 's', 't', 'u', 'v', 'w', 'x', 'y', 'z']
 
 class COCOData(Dataset):
     """
@@ -35,6 +37,7 @@ class COCOData(Dataset):
 
         # Map original COCO category IDs to contiguous 1..N
         cats = self.coco.loadCats(self.coco.getCatIds())
+        cats = [cat for cat in cats if cat['name'] in EXPECTED_CLASSES]
         cats = sorted(cats, key=lambda x: x['id'])
         self.cat_id_to_contiguous = {cat['id']: i+1 for i, cat in enumerate(cats)}
         self.num_classes = len(cats) + 1  # +1 for background=0
@@ -46,46 +49,34 @@ class COCOData(Dataset):
         img_id = self.image_ids[idx]
         info = self.coco.imgs[img_id]
         img_path = self.images_dir / info['file_name']
-        if not img_path.exists():
-            raise FileNotFoundError(f"Image file not found: {img_path}")
         
-        # Load and letterbox image
+        # Load image (already resized and padded by Roboflow)
         img = Image.open(img_path).convert("RGB")
-        orig_w, orig_h = info['width'], info['height']
-        target_w, target_h = self.image_size
-        scale = min(target_w / orig_w, target_h / orig_h)
-        new_w, new_h = int(orig_w * scale), int(orig_h * scale)
-        img_resized = img.resize((new_w, new_h), Image.LANCZOS)
-        letterboxed = Image.new('RGB', (target_w, target_h), (114, 114, 114))
-        paste_x, paste_y = (target_w - new_w) // 2, (target_h - new_h) // 2
-        letterboxed.paste(img_resized, (paste_x, paste_y))
-        img_np = np.array(letterboxed).astype(np.float32) / 255.0
+        
+        # Simple conversion to tensor (no resizing/padding needed)
+        img_np = np.array(img).astype(np.float32) / 255.0
         img_tensor = torch.from_numpy(img_np.transpose(2,0,1)).float()
-        # Load and transform annotations
+        
+        # Load annotations (coordinates already match the processed image)
         ann_ids = self.coco.getAnnIds(imgIds=img_id)
         anns = self.coco.loadAnns(ann_ids)
+        
         boxes, labels = [], []
         for ann in anns:
             x, y, w, h = ann['bbox']
-            if w * h < self.min_area:
-                continue
-            x1, y1, x2, y2 = x, y, x + w, y + h
-            x1n = x1 * scale + paste_x
-            y1n = y1 * scale + paste_y
-            x2n = x2 * scale + paste_x
-            y2n = y2 * scale + paste_y
-            x1n, y1n = max(0, x1n), max(0, y1n)
-            x2n, y2n = min(target_w, x2n), min(target_h, y2n)
-            
-            if x2n > x1n and y2n > y1n:
-                if (x2n - x1n) * (y2n - y1n) >= self.min_area:
-                    boxes.append([x1n, y1n, x2n, y2n])
-                    labels.append(self.cat_id_to_contiguous[ann['category_id']])
-                    if self.max_detections and len(boxes) >= self.max_detections:
-                        break
+            boxes.append([x, y, x + w, y + h])
+            labels.append(self.cat_id_to_contiguous[ann['category_id']])
+        
+        # Convert to tensors
         if boxes:
-            return img_tensor, torch.tensor(labels, dtype=torch.long), torch.tensor(boxes, dtype=torch.float32)
-        return img_tensor, torch.zeros((0,), dtype=torch.long), torch.zeros((0,4), dtype=torch.float32)
+            box_tensor = torch.tensor(boxes, dtype=torch.float32)
+            label_tensor = torch.tensor(labels, dtype=torch.long)
+        else:
+            box_tensor = torch.zeros((0,4), dtype=torch.float32)
+            label_tensor = torch.zeros((0,), dtype=torch.long)
+        
+        return img_tensor, label_tensor, box_tensor
+
         
     def get_num_classes(self):
         return self.num_classes
@@ -93,6 +84,8 @@ class COCOData(Dataset):
     def get_class_names(self):
         cats = self.coco.loadCats(self.coco.getCatIds())
         cats = sorted(cats, key=lambda x: x['id'])
+        for c in cats:
+            print(f"Class {c['id']}: {c['name']}")
         return ['__background__'] + [c['name'] for c in cats]
     
 def collate_fn(batch):
