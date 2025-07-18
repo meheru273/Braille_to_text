@@ -162,7 +162,7 @@ def train(train_dir: pathlib.Path, val_dir: pathlib.Path, writer, resume_ckpt_pa
             print("batch no :", batch_idx, "of epoch", epoch)
             
             # ✅ FIXED: Mixed precision forward pass
-            with torch.amp.autocast():
+            with torch.amp.autocast(device_type="cuda"):
                 # Normalize batch
                 batch_norm = normalize_batch(x)
                 
@@ -230,7 +230,7 @@ def train(train_dir: pathlib.Path, val_dir: pathlib.Path, writer, resume_ckpt_pa
                     x = x.to(device)
                     
                     # Use autocast for validation too
-                    with torch.amp.autocast():
+                    with torch.amp.autocast(device_type="cuda"):
                         batch_norm = normalize_batch(x)
                         cls_pred, cen_pred, box_pred = model(batch_norm)
                     
