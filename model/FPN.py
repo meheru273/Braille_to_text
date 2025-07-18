@@ -240,7 +240,7 @@ class FPN(nn.Module):
             # Classification branch
             cls_features = self.classification_head(fpn_feature)
             classes = self.classification_to_class(cls_features)
-            centerness = torch.sigmoid(self.classification_to_centerness(cls_features))
+            centerness = self.classification_to_centerness(cls_features)
             
             # FIXED: Regression branch 
             reg_features = self.regression_head(fpn_feature)

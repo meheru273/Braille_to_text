@@ -16,7 +16,7 @@ def _compute_loss(
     num_classes = classes[0].shape[-1]
 
     box_loss_fn = torch.nn.SmoothL1Loss(reduction='none')
-    cen_loss_fn = torch.nn.BCELoss(reduction='none')
+    cen_loss_fn = torch.nn.BCEWithLogitsLoss(reduction='none')
 
     classification_losses = []
     centerness_losses = []
