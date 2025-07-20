@@ -21,7 +21,7 @@ logger = logging.getLogger(__name__)
 from loss import _compute_loss, compute_attention_loss
 import time
 from Dataset import DSBIData ,COCOData ,collate_fn
-
+import gc
 
 def tensor_to_image(tensor):
     """Convert tensor to numpy array for visualization"""
@@ -136,6 +136,10 @@ def train(train_dir: pathlib.Path, val_dir: pathlib.Path, writer, resume_ckpt_pa
         epoch_att_losses = []
         
         for batch_idx, (x, class_labels, box_labels) in enumerate(train_loader):
+            
+            torch.cuda.empty_cache()
+            gc.collect()
+
             optimizer.zero_grad()
             x = x.to(device)
             print("batch no :", batch_idx, "of epoch", epoch)
