@@ -84,6 +84,39 @@ def detailed_memory_report(stage_name):
     print()
     
     
+def debug_target_generation(img_shape, class_labels, box_labels, strides):
+    """Debug version of generate_targets with memory tracking"""
+    
+    print("=== Target Generation Memory Debug ===")
+    detailed_memory_report("Before Target Generation")
+    
+    batch_size, _, img_h, img_w = img_shape
+    class_targets = []
+    box_targets = []
+    
+    for level_idx, stride in enumerate(strides):
+        detailed_memory_report(f"Before Level {level_idx}")
+        
+        feat_h, feat_w = img_h // stride, img_w // stride
+        
+        # Check tensor creation
+        cls_target = torch.zeros((batch_size, feat_h, feat_w), dtype=torch.long)
+        box_target = torch.zeros((batch_size, feat_h, feat_w, 4), dtype=torch.float32)
+        
+        detailed_memory_report(f"After Creating Targets Level {level_idx}")
+        
+        # ... your existing target generation logic ...
+        
+        class_targets.append(cls_target)
+        box_targets.append(box_target)
+        
+        detailed_memory_report(f"After Level {level_idx}")
+    
+    detailed_memory_report("After All Target Generation")
+    return class_targets, box_targets
+
+# Replace your generate_targets call temporarily:
+# class_t, box_t = debug_target_generation(x.shape, class_labels, box_labels, model.strides)
 
 
 
@@ -135,6 +168,41 @@ def train(train_dir: pathlib.Path, val_dir: pathlib.Path, writer, resume_ckpt_pa
         pin_memory=True,
         persistent_workers=True
     )
+    
+    def test_dataloader_memory():
+        """Test if DataLoader is causing memory leaks"""
+    print("=== Testing DataLoader Memory ===")
+    
+    # Test with different configurations
+    configs = [
+        {"num_workers": 0, "pin_memory": False},
+        {"num_workers": 0, "pin_memory": True},
+        {"num_workers": 2, "pin_memory": False},
+        {"num_workers": 2, "pin_memory": True},
+    ]
+    
+    for config in configs:
+        print(f"Testing config: {config}")
+        detailed_memory_report("Before DataLoader Creation")
+        
+        test_loader = DataLoader(
+            train_dataset,
+            batch_size=1,
+            **config,
+            collate_fn=collate_fn
+        )
+        detailed_memory_report("After DataLoader Creation")
+        
+        # Load one batch
+        batch = next(iter(test_loader))
+        detailed_memory_report("After Loading One Batch")
+        
+        # Clean up
+        del batch, test_loader
+        torch.cuda.empty_cache()
+        gc.collect()
+        detailed_memory_report("After Cleanup")
+        print("---")
     
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"Using device: {device}")
@@ -367,37 +435,3 @@ if __name__ == "__main__":
     train(train_dir, val_dir, writer, resume_ckpt_path)
 
 
-def test_dataloader_memory():
-    """Test if DataLoader is causing memory leaks"""
-    print("=== Testing DataLoader Memory ===")
-    
-    # Test with different configurations
-    configs = [
-        {"num_workers": 0, "pin_memory": False},
-        {"num_workers": 0, "pin_memory": True},
-        {"num_workers": 2, "pin_memory": False},
-        {"num_workers": 2, "pin_memory": True},
-    ]
-    
-    for config in configs:
-        print(f"Testing config: {config}")
-        detailed_memory_report("Before DataLoader Creation")
-        
-        test_loader = DataLoader(
-            train_dataset,
-            batch_size=1,
-            **config,
-            collate_fn=collate_fn
-        )
-        detailed_memory_report("After DataLoader Creation")
-        
-        # Load one batch
-        batch = next(iter(test_loader))
-        detailed_memory_report("After Loading One Batch")
-        
-        # Clean up
-        del batch, test_loader
-        torch.cuda.empty_cache()
-        gc.collect()
-        detailed_memory_report("After Cleanup")
-        print("---")

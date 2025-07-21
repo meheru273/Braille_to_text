@@ -38,12 +38,12 @@ def generate_targets(img_shape, class_labels_by_batch, box_labels_by_batch, stri
                 # if not (size_range[0] <= max_side < size_range[1]):
                 #     continue
                 
-                # ✅ Improved feature map coordinate calculation
+                
                 # Use floating point for more accurate mapping
                 feat_x1 = max(0, int(x1 / stride))
                 feat_y1 = max(0, int(y1 / stride))
-                feat_x2 = min(feat_w, int((x2 - 1) / stride) + 1)  # ✅ Fixed boundary
-                feat_y2 = min(feat_h, int((y2 - 1) / stride) + 1)  # ✅ Fixed boundary
+                feat_x2 = min(feat_w, int((x2 - 1) / stride) + 1)  
+                feat_y2 = min(feat_h, int((y2 - 1) / stride) + 1)  
                 
                 for feat_y in range(feat_y1, feat_y2):
                     for feat_x in range(feat_x1, feat_x2):
