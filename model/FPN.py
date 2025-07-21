@@ -105,13 +105,14 @@ class FPN(nn.Module):
     def __init__(self, num_classes=27):
         super(FPN, self).__init__()
         
+        self.use_checkpoint = True
+        
         from BackBone import BackBone
         self.backbone = BackBone()
         
         if num_classes is None:
             num_classes = len(BRAILLE_CLASSES)
-        
-        
+            
         self.num_classes = num_classes
         
         # FIXED: Consistent configuration for 5 levels
@@ -121,10 +122,9 @@ class FPN(nn.Module):
 
         self.coord_attention = nn.ModuleList([   
             CoordinateAttention(64, reduction=16),  # P2 (highest resolution)
-            CoordinateAttention(512, reduction=16),  # P5 (deepest features)
+            CoordinateAttention(256, reduction=16),  # P5 (deepest features)
         ])
-        
-        
+           
         # Lateral connections for ResNet-50 channels
         self.lateral_convs = nn.ModuleList([
             self._make_lateral_conv(64, 256),   
