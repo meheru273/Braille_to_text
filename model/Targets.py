@@ -6,7 +6,6 @@ def generate_targets(img_shape, class_labels_by_batch, box_labels_by_batch, stri
     batch_size, _, img_h, img_w = img_shape
     
     class_targets = []
-    centerness_targets = []
     box_targets = []
     
     # Use original FCOS size ranges
@@ -55,12 +54,7 @@ def generate_targets(img_shape, class_labels_by_batch, box_labels_by_batch, stri
                                 # Assign positive label
                                 cls_target[batch_idx, feat_y, feat_x] = label
                                 
-                                # Calculate centerness
-                                centerness = math.sqrt(
-                                    (min(left, right) / max(left, right)) *
-                                    (min(top, bottom) / max(top, bottom))
-                                )
-                                cen_target[batch_idx, feat_y, feat_x] = centerness
+                               
                                 
                                 # Box regression targets (normalized by stride)
                                 box_target[batch_idx, feat_y, feat_x] = torch.tensor([
@@ -68,10 +62,9 @@ def generate_targets(img_shape, class_labels_by_batch, box_labels_by_batch, stri
                                 ])
         
         class_targets.append(cls_target)
-        centerness_targets.append(cen_target)
         box_targets.append(box_target)
     
-    return class_targets, centerness_targets, box_targets
+    return class_targets, box_targets
 
 
 def generate_attention_targets(img_shape, box_labels_by_batch, strides):

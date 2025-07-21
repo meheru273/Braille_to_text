@@ -67,16 +67,26 @@ class SE_Attention(nn.Module):
         se = self.fc(se)
         return x * se
     
-class MultiScaleAttention(nn.Module):
-    def __init__(self, in_channels, reduction=16):
-        super(MultiScaleAttention, self).__init__()
-        self.se_attention = SE_Attention(in_channels, reduction)
-        self.cbam_attention = CBAM(in_channels, reduction)
+class CoordinateAttention(nn.Module):
+    def __init__(self, channels, reduction=32):
+        super().__init__()
+        self.pool_h = nn.AdaptiveAvgPool2d((None, 1))
+        self.pool_w = nn.AdaptiveAvgPool2d((1, None))
+        
+        mip = max(8, channels // reduction)
+        self.conv1 = nn.Conv2d(channels, mip, 1)
+        self.conv_h = nn.Conv2d(mip, channels, 1)
+        self.conv_w = nn.Conv2d(mip, channels, 1)
     
     def forward(self, x):
-        # Apply SE attention
-        se_out = self.se_attention(x)
-        # Apply CBAM attention
-        cbam_out = self.cbam_attention(x)
-        # Combine both attentions
-        return se_out + cbam_out
+        # Much more memory-efficient than CBAM
+        n, c, h, w = x.size()
+        x_h = self.pool_h(x)
+        x_w = self.pool_w(x).permute(0, 1, 3, 2)
+        
+        y = torch.cat([x_h, x_w], dim=2)
+        y = F.relu(self.conv1(y))
+        x_h, x_w = torch.split(y, [h, w], dim=2)
+        x_w = x_w.permute(0, 1, 3, 2)
+        
+        return x * torch.sigmoid(self.conv_h(x_h)) * torch.sigmoid(self.conv_w(x_w))

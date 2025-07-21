@@ -3,7 +3,9 @@ import numpy as np
 import torch
 from FPN import FPN
 from inference import compute_detections, render_detections_to_image, tensor_to_image
-from PostProcessing import generate_colors,compute_iou, non_max_suppression,refine_large_boxes,letterbox_image, map_detections_to_original
+from PostProcessing import (generate_colors, non_max_suppression, 
+                           refine_large_boxes, smart_resize, 
+                           map_detections_to_original)
 
 from torchviz import make_dot
 import torch
@@ -43,25 +45,43 @@ def apply_postprocessing_pipeline(detections, confidence_threshold=0.3, nms_thre
     
     return refined_detections
 
+def analyze_detection_distribution(detections, img_shape):
+    """Check if detections are properly distributed"""
+    orig_h, orig_w = img_shape[:2]
+    quadrants = {'top_left': 0, 'top_right': 0, 'bottom_left': 0, 'bottom_right': 0}
+    
+    for det in detections:
+        x_center = (det.bbox[0] + det.bbox[2]) / 2
+        y_center = (det.bbox[1] + det.bbox[3]) / 2
+        
+        if x_center < orig_w / 2 and y_center < orig_h / 2:
+            quadrants['top_left'] += 1
+        # ... (continue for other quadrants)
+    
+    for quadrant, count in quadrants.items():
+        percentage = count / len(detections) * 100 if detections else 0
+        print(f"{quadrant}: {count} ({percentage:.1f}%)")
+
 def main():
     print("=== BRAILLE DETECTION WITH POSTPROCESSING ===")
     
-    # 1. Load model (same as before)
+    # 1. Load model
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    model = FPN(num_classes=28)
+    model = FPN(num_classes=27)
     
     try:
-        ckpt = torch.load("runs/fcos_custom/fcos_epoch10.pth", map_location=device, weights_only=False)
+        ckpt = torch.load("runs/fcos_cbam/fcos_epoch30.pth", map_location=device, weights_only=False)
         model.load_state_dict(ckpt["model_state"])
         model.to(device)
-        model.eval()  # Important: set to evaluation mode
+        model.eval()
         print(f"[OK] Model loaded on {device}")
     except Exception as e:
         print(f"[ERROR] Failed to load model: {e}")
         return
     
     # 2. Load and preprocess image
-    img_path = "B38.jpg"
+    img_path = "testImage/before3.jpeg"
+    
     try:
         img_bgr = cv2.imread(img_path)
         if img_bgr is None:
@@ -72,18 +92,16 @@ def main():
         orig_shape = img_rgb.shape
         print(f"[OK] Loaded image: {orig_shape}")
         
-        # Apply letterboxing
-        img_letterboxed, scale, paste_x, paste_y = letterbox_image(img_rgb)
-        print(f"[OK] Letterboxed image: {img_letterboxed.shape}")
+        img_resized, scale = smart_resize(img_rgb, max_size=(800, 1200))
+        print(f"[OK] Resized image: {img_resized.shape}")
         
-    except Exception as e:
-        print(f"[ERROR] Image preprocessing failed: {e}")
-        return
-    
-    # 3. Run detection
-    try:
+        # Define H, W in the same scope as detection processing
+        H, W = img_resized.shape[:2]
+        print(f"[DEBUG] H={H}, W={W}")
+        
+        # 3. Run detection - MOVED INSIDE THE SAME TRY BLOCK
         print("\n=== RUNNING DETECTION ===")
-        raw_detections = compute_detections(model, img_letterboxed, device)
+        raw_detections = compute_detections(model, img_resized, device)
         print(f"[OK] Raw detections: {len(raw_detections)}")
         
         # 4. Apply postprocessing pipeline
@@ -102,28 +120,18 @@ def main():
             print(f"  {i}: class={det.object_class}, score={det.score:.3f}, "
                   f"size={width:.0f}x{height:.0f}, area={width*height:.0f}")
         
-    except Exception as e:
-        print(f"[ERROR] Detection/postprocessing failed: {e}")
-        return
-    
-    # 5. Map to original coordinates
-    try:
+        # 5. Map to original coordinates
         print("\n=== MAPPING TO ORIGINAL COORDINATES ===")
         original_detections = map_detections_to_original(
-            processed_detections, scale, paste_x, paste_y, orig_shape
+             processed_detections, scale, orig_shape
         )
         print(f"[OK] Mapped {len(original_detections)} detections")
         
-    except Exception as e:
-        print(f"[ERROR] Coordinate mapping failed: {e}")
-        return
-    
-    # 6. Visualize results with colors
-    try:
+        # 6. Visualize results with colors
         print("\n=== CREATING VISUALIZATIONS ===")
         
         # Generate colors for classes
-        colors = generate_colors(28)
+        colors = generate_colors(27)
         
         # Create enhanced visualization
         img_with_detections = create_enhanced_visualization(
@@ -134,17 +142,27 @@ def main():
         cv2.imwrite("detections_postprocessed.jpg", 
                    cv2.cvtColor(img_with_detections, cv2.COLOR_RGB2BGR))
         print("[OK] Saved 'detections_postprocessed.jpg'")
-        dot = make_dot(model, params=dict(model.named_parameters()))
-        dot.render("fpn_architecture", format="png")
-
+        
+        # Generate model architecture diagram
+        try:
+            dot = make_dot(model, params=dict(model.named_parameters()))
+            dot.render("fpn_architecture", format="png")
+            print("[OK] Saved model architecture diagram")
+        except Exception as viz_error:
+            print(f"[WARNING] Could not save architecture diagram: {viz_error}")
+        
+        # Final summary
+        analyze_detection_distribution(original_detections, orig_shape)
+        print(f"\n=== SUMMARY ===")
+        print(f"Raw detections: {len(raw_detections)}")
+        print(f"Final detections: {len(original_detections)}")
+        print(f"Improvement: {len(raw_detections) - len(original_detections)} duplicates/false positives removed")
+        
     except Exception as e:
-        print(f"[ERROR] Visualization failed: {e}")
+        print(f"[ERROR] Detection/postprocessing failed: {e}")
+        import traceback
+        traceback.print_exc()
         return
-    
-    print(f"\n=== SUMMARY ===")
-    print(f"Raw detections: {len(raw_detections)}")
-    print(f"Final detections: {len(original_detections)}")
-    print(f"Improvement: {len(raw_detections) - len(original_detections)} duplicates/false positives removed")
 
 def create_enhanced_visualization(img, detections, colors):
     """Create enhanced visualization with class-specific colors"""

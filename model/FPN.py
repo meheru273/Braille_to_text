@@ -5,7 +5,8 @@ import math
 from typing import List, Tuple
 import numpy as np
 
-from Attention import CBAM , SE_Attention
+from Attention import CoordinateAttention
+from torchvision.ops import DeformConv2d
 # Braille character classes
 BRAILLE_CLASSES = [
     "BACKGROUND",
@@ -117,11 +118,13 @@ class FPN(nn.Module):
         self.strides = [2,4, 8, 16, 32]
         self.scales = nn.Parameter(torch.tensor([8.0,6.0, 4.0, 2.5, 2.0]))
 
-        
-        self.fpn_cbam = nn.ModuleList([
-            CBAM(256, reduction=8) for _ in range(5)  
-        ])
 
+        self.coord_attention = nn.ModuleList([   
+            CoordinateAttention(256, reduction=16),  # P2 (highest resolution)
+            CoordinateAttention(256, reduction=16),  # P5 (deepest features)
+        ])
+        
+        
         # Lateral connections for ResNet-50 channels
         self.lateral_convs = nn.ModuleList([
             self._make_lateral_conv(64, 256),   
@@ -148,7 +151,7 @@ class FPN(nn.Module):
         
         # Output layers
         self.classification_to_class = nn.Conv2d(128, self.num_classes, kernel_size=3, padding=1)
-        self.classification_to_centerness = nn.Conv2d(128, 1, kernel_size=3, padding=1)
+    
         
         # Regression head
         self.regression_head = nn.Sequential(
@@ -188,9 +191,7 @@ class FPN(nn.Module):
         bias_value = -math.log((1 - prior_prob) / prior_prob)
         nn.init.constant_(self.classification_to_class.bias, bias_value)
         
-        # Initialize centerness and regression outputs
-        nn.init.normal_(self.classification_to_centerness.weight, std=0.01)
-        nn.init.constant_(self.classification_to_centerness.bias, 0)
+        # Initialize regression outputs
         nn.init.normal_(self.regression_to_bbox.weight, std=0.01)
         nn.init.constant_(self.regression_to_bbox.bias, 0)
     
@@ -199,27 +200,14 @@ class FPN(nn.Module):
         backbone_features = self.backbone(x)   
         c2, c3, c4, c5 = backbone_features
         
-        self.attention_maps = []    
-        if hasattr(self, 'attention_maps'):
-            for att_map in self.attention_maps:
-                del att_map
-        
          # Build FPN pyramid (top-down)
         p5 = self.lateral_convs[3](c5)
-        p5 = self.fpn_cbam[3](p5)  
-        self.attention_maps.append(p5.mean(1, keepdim=True).detach())  
+        p5 = self.coord_attention[1](p5)
         
         p4 = self.lateral_convs[2](c4) + _upsample(p5, c4.shape[2:])
-        p4 = self.fpn_cbam[2](p4) 
-        self.attention_maps.append(p4.mean(1, keepdim=True).detach()) 
-        
         p3 = self.lateral_convs[1](c3) + _upsample(p4, c3.shape[2:])
-        p3 = self.fpn_cbam[1](p3)  
-        self.attention_maps.append(p3.mean(1, keepdim=True).detach())  
-        
         p2 = self.lateral_convs[0](c2) + _upsample(p3, c2.shape[2:])
-        p2 = self.fpn_cbam[0](p2) 
-        self.attention_maps.append(p2.mean(1, keepdim=True).detach())  
+        p2 = self.coord_attention[0](p2)
         
         # Generate P6 level
         p6 = self.extra_convs[0](p5)
@@ -229,14 +217,12 @@ class FPN(nn.Module):
         
         # Apply detection heads
         classes_by_feature = []
-        centerness_by_feature = []
         regression_by_feature = []
         
         for scale, fpn_feature in zip(self.scales, fpn_features):
             # Classification branch
             cls_features = self.classification_head(fpn_feature)
             classes = self.classification_to_class(cls_features)
-            centerness = torch.sigmoid(self.classification_to_centerness(cls_features))
             
             # FIXED: Regression branch 
             reg_features = self.regression_head(fpn_feature)
@@ -244,14 +230,12 @@ class FPN(nn.Module):
             
             # Reshape outputs: B[C]HW -> BHW[C]
             classes = classes.permute(0, 2, 3, 1).contiguous()
-            centerness = centerness.permute(0, 2, 3, 1).contiguous().squeeze(-1)
             bbox_pred = bbox_pred.permute(0, 2, 3, 1).contiguous()
             
             classes_by_feature.append(classes)
-            centerness_by_feature.append(centerness)
             regression_by_feature.append(bbox_pred)
         
-        return classes_by_feature, centerness_by_feature, regression_by_feature
+        return classes_by_feature, regression_by_feature
 
 def normalize_batch(x: torch.Tensor) -> torch.Tensor:
     """Proper normalization for training and inference consistency"""

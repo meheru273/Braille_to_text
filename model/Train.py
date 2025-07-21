@@ -13,15 +13,16 @@ from pycocotools.coco import COCO
 import cv2
 
 # Import existing functions from your modules
-from inference import detections_from_network_output, render_detections_to_image
+from inference import detections_from_network_output
 from FPN import FPN, normalize_batch, FocalLoss
 from Targets import generate_targets
 logger = logging.getLogger(__name__)
 
-from loss import _compute_loss, compute_attention_loss
-import time
+from loss import _compute_loss
 from Dataset import DSBIData ,COCOData ,collate_fn
 import gc
+from torch.cuda.amp import autocast, GradScaler
+
 
 def tensor_to_image(tensor):
     """Convert tensor to numpy array for visualization"""
@@ -93,6 +94,7 @@ def train(train_dir: pathlib.Path, val_dir: pathlib.Path, writer, resume_ckpt_pa
     
     # Create optimizer with different learning rates
     optimizer = create_optimizer(model, BASE_LR)
+    scaler = torch.amp.GradScaler()
     
     # Learning rate scheduler
     if resume_ckpt_path is not None and os.path.isfile(resume_ckpt_path):
@@ -112,6 +114,8 @@ def train(train_dir: pathlib.Path, val_dir: pathlib.Path, writer, resume_ckpt_pa
         
         # Load scheduler state
         scheduler.load_state_dict(checkpoint['scheduler_state'])
+        if 'scaler_state' in checkpoint:
+            scaler.load_state_dict(checkpoint['scaler_state'])
         start_epoch = checkpoint['epoch'] + 1
         print(f"✅ Training will resume from epoch {start_epoch}")
         
@@ -131,7 +135,6 @@ def train(train_dir: pathlib.Path, val_dir: pathlib.Path, writer, resume_ckpt_pa
         model.train()
         epoch_losses = []
         epoch_cls_losses = []
-        epoch_cen_losses = []
         epoch_reg_losses = []
         epoch_att_losses = []
         
@@ -144,39 +147,30 @@ def train(train_dir: pathlib.Path, val_dir: pathlib.Path, writer, resume_ckpt_pa
             x = x.to(device)
             print("batch no :", batch_idx, "of epoch", epoch)
             
-            # Normalize batch
-            batch_norm = normalize_batch(x)
-            
-            # Forward pass
-            cls_pred, cen_pred, box_pred = model(batch_norm)
+            # ✅ NEW CODE with gradient scaler
+            with torch.amp.autocast():
+                batch_norm = normalize_batch(x)
+                cls_pred, box_pred = model(batch_norm)
+                class_t, box_t = generate_targets(x.shape, class_labels, box_labels, model.strides)
+                total_loss, cls_loss, reg_loss, att_loss = _compute_loss(
+                    cls_pred, box_pred, class_t, box_t, focal_loss,
+                    attention_maps=model.attention_maps,
+                    box_labels_by_batch=box_labels,
+                    img_shape=x.shape,
+                    strides=model.strides,
+                    attention_weight=0.1
+                )
 
-            # Generate targets
-            class_t, cen_t, box_t = generate_targets(
-                x.shape, class_labels, box_labels, model.strides)
-
-            total_loss, cls_loss, cen_loss, reg_loss, att_loss = _compute_loss(
-                cls_pred, cen_pred, box_pred,
-                class_t, cen_t, box_t,
-                focal_loss,
-                attention_maps=model.attention_maps,
-                box_labels_by_batch=box_labels,
-                img_shape=x.shape,
-                strides=model.strides,
-                attention_weight=0.1)
-
-            # ✅ FIXED: Proper gradient handling
-            total_loss.backward()
-            
-            # ✅ FIXED: Gradient clipping BEFORE optimizer step
+            scaler.scale(total_loss).backward()
+            scaler.unscale_(optimizer)
             torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=10.0)
-            
-            # ✅ FIXED: Single optimizer step
-            optimizer.step()
+            scaler.step(optimizer)
+            scaler.update()
 
+                        
             # ✅ FIXED: Track losses only once
             epoch_losses.append(total_loss.item())
             epoch_cls_losses.append(cls_loss.item())
-            epoch_cen_losses.append(cen_loss.item())
             epoch_reg_losses.append(reg_loss.item())
             epoch_att_losses.append(att_loss.item())
         
@@ -186,7 +180,6 @@ def train(train_dir: pathlib.Path, val_dir: pathlib.Path, writer, resume_ckpt_pa
         # Calculate average losses
         avg_loss = np.mean(epoch_losses)
         avg_cls_loss = np.mean(epoch_cls_losses)
-        avg_cen_loss = np.mean(epoch_cen_losses)
         avg_reg_loss = np.mean(epoch_reg_losses)
         avg_att_loss = np.mean(epoch_att_losses)
         
@@ -194,7 +187,6 @@ def train(train_dir: pathlib.Path, val_dir: pathlib.Path, writer, resume_ckpt_pa
         print(f"Epoch {epoch} completed:")
         print(f"  Avg Total Loss: {avg_loss:.4f}")
         print(f"  Avg Cls Loss: {avg_cls_loss:.4f}")
-        print(f"  Avg Cen Loss: {avg_cen_loss:.4f}")
         print(f"  Avg Reg Loss: {avg_reg_loss:.4f}")
         print(f"  Avg Att Loss: {avg_att_loss:.4f}")
         
@@ -209,11 +201,11 @@ def train(train_dir: pathlib.Path, val_dir: pathlib.Path, writer, resume_ckpt_pa
                         
                     x = x.to(device)
                     batch_norm = normalize_batch(x)
-                    cls_pred, cen_pred, box_pred = model(batch_norm)
+                    cls_pred, box_pred = model(batch_norm)
                     
                     H, W = x.shape[2], x.shape[3]
                     detections = detections_from_network_output(
-                        H, W, cls_pred, cen_pred, box_pred, model.scales, model.strides
+                        H, W, cls_pred, box_pred, model.scales, model.strides
                     )
                          
                     print(f"Validation image 0: {len(detections[0])} detections, "
@@ -230,13 +222,13 @@ def train(train_dir: pathlib.Path, val_dir: pathlib.Path, writer, resume_ckpt_pa
                 'model_state': model.state_dict(),
                 'optimizer_state': optimizer.state_dict(),
                 'scheduler_state': scheduler.state_dict(),
+                'scaler_state': scaler.state_dict(),
                 'epoch': epoch,
                 'class_names': class_names,
                 'num_classes': num_classes,
                 'losses': {
                     'total': avg_loss,
                     'classification': avg_cls_loss,
-                    'centerness': avg_cen_loss,
                     'regression': avg_reg_loss,
                     'attention': avg_att_loss
                 },

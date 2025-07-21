@@ -33,13 +33,8 @@ def render_detections_to_image(img: np.ndarray, detections: List[Detection]):
     return img
 
 def compute_detections(model: FPN, img: np.ndarray, device) -> List[Detection]:
-    """
-    Take a NumPy image (HWC, uint8 or float) and return detections.
-    """
+    
     model.eval()
-    # 1. Convert img (NumPy HWC) to tensor [1,3,H,W], float in [0,1]
-
-    # If img is uint8 [0,255], convert:
     if img.dtype == np.uint8:
         tensor = torch.from_numpy(img.astype(np.float32) / 255.0).permute(2,0,1).unsqueeze(0)
     else:
@@ -52,13 +47,13 @@ def compute_detections(model: FPN, img: np.ndarray, device) -> List[Detection]:
 
     # 3. Forward pass
     with torch.no_grad():
-        classes_by_feature, centerness_by_feature, boxes_by_feature = model(batch)
+        classes_by_feature, boxes_by_feature = model(batch)
 
     # 4. Decode detections
     H, W = tensor.shape[2], tensor.shape[3]
     detections = detections_from_network_output(
         H, W,
-        classes_by_feature, centerness_by_feature, boxes_by_feature,
+        classes_by_feature, boxes_by_feature,
         model.scales, model.strides
     )
     # returns List[List[Detection]]; since batch size=1, you can return detections[0]
@@ -66,29 +61,25 @@ def compute_detections(model: FPN, img: np.ndarray, device) -> List[Detection]:
 
 
 def detections_from_network_output(
-    img_height, img_width, classes, centernesses, boxes, scales, strides
+    img_height, img_width, classes, boxes, scales, strides
 ) -> List[List[Detection]]:
     all_classes = []
-    all_centernesses = []
     all_boxes = []
-
     n_classes = classes[0].shape[-1]
     batch_size = classes[0].shape[0]
 
-    for feat_classes, feat_centernesses, feat_boxes, scale, stride in zip(
-        classes, centernesses, boxes, scales, strides
+    for feat_classes, feat_boxes, scale, stride in zip(
+        classes,  boxes, scales, strides
     ):
         boxes = _boxes_from_regression(feat_boxes, img_height, img_width, scale, stride)
 
         all_classes.append(feat_classes.view(batch_size, -1, n_classes))
-        all_centernesses.append(feat_centernesses.view(batch_size, -1))
         all_boxes.append(boxes.view(batch_size, -1, 4))
 
     classes_ = torch.cat(all_classes, dim=1)
-    centernesses_ = torch.cat(all_centernesses, dim=1)
     boxes_ = torch.cat(all_boxes, dim=1)
 
-    gathered_boxes, gathered_classes, gathered_scores = _gather_detections(classes_, centernesses_, boxes_)
+    gathered_boxes, gathered_classes, gathered_scores = _gather_detections(classes_, boxes_)
     return detections_from_net(gathered_boxes, gathered_classes, gathered_scores)
 
 
@@ -145,19 +136,17 @@ def detections_from_net(boxes_by_batch, classes_by_batch, scores_by_batch=None) 
 # Add this to inference.py after the existing detections_from_network_output function
 
 def debug_detections_from_network_output(
-    img_height, img_width, classes, centernesses, boxes, scales, strides
+    img_height, img_width, classes, boxes, scales, strides
 ):
     print("\n=== DETAILED DETECTION DEBUGGING ===")
     
     all_classes = []
-    all_centernesses = []
     all_boxes = []
-    
     n_classes = classes[0].shape[-1]
     batch_size = classes[0].shape[0]
     
-    for i, (feat_classes, feat_centernesses, feat_boxes, scale, stride) in enumerate(zip(
-        classes, centernesses, boxes, scales, strides
+    for i, (feat_classes, feat_boxes, scale, stride) in enumerate(zip(
+        classes, boxes, scales, strides
     )):
         print(f"\nLevel {i} (stride={stride}, scale={scale}):")
         
@@ -166,25 +155,15 @@ def debug_detections_from_network_output(
         print(f"  Class scores: max={class_scores.max():.4f}, mean={class_scores.mean():.4f}")
         print(f"  Non-background pixels: {(class_indices > 0).sum()}")
         
-        # Check centerness
-        print(f"  Centerness: max={feat_centernesses.max():.4f}, mean={feat_centernesses.mean():.4f}")
-        
-        # Combined score
-        combined_score = class_scores * feat_centernesses
-        print(f"  Combined score: max={combined_score.max():.4f}, mean={combined_score.mean():.4f}")
-        print(f"  Above 0.001: {(combined_score > 0.001).sum()}")
-        print(f"  Above 0.01: {(combined_score > 0.01).sum()}")
         
         # Convert boxes
         boxes_converted = _boxes_from_regression(feat_boxes, img_height, img_width, scale, stride)
         
         all_classes.append(feat_classes.view(batch_size, -1, n_classes))
-        all_centernesses.append(feat_centernesses.view(batch_size, -1))
         all_boxes.append(boxes_converted.view(batch_size, -1, 4))
     
     # Continue with normal processing...
     classes_ = torch.cat(all_classes, dim=1)
-    centernesses_ = torch.cat(all_centernesses, dim=1)
     boxes_ = torch.cat(all_boxes, dim=1)
     
     print(f"\nCombined stats:")
@@ -192,20 +171,16 @@ def debug_detections_from_network_output(
     
     # Debug the gathering process
     class_scores, class_indices = torch.max(classes_, dim=2)
-    combined_scores = class_scores * centernesses_
-    
     print(f"  Non-background: {(class_indices[0] > 0).sum()}")
-    print(f"  Combined > 0.001: {(combined_scores[0] > 0.001).sum()}")
-    print(f"  Combined > 0.01: {(combined_scores[0] > 0.01).sum()}")
     
-    return _gather_detections(classes_, centernesses_, boxes_)
+    
+    return _gather_detections(classes_, boxes_)
 
 
 
-def _gather_detections(classes, centernesses, boxes, max_detections=DEFAULT_MAX_DETECTIONS):
+def _gather_detections(classes, boxes, max_detections=DEFAULT_MAX_DETECTIONS):
     # classes: BHW[c] class index of each box
     class_scores, class_indices = torch.max(classes, dim=2)
-
     boxes_by_batch = []
     classes_by_batch = []
     scores_by_batch = []
@@ -217,16 +192,14 @@ def _gather_detections(classes, centernesses, boxes, max_detections=DEFAULT_MAX_
 
         class_scores_i = class_scores[i][non_background_points]
         boxes_i = boxes[i][non_background_points]
-        centerness_i = centernesses[i][non_background_points]
         class_indices_i = class_indices[i][non_background_points]
 
-        class_scores_i = class_scores_i.mul(centerness_i)
+        #class_scores_i = class_scores_i.mul(centerness_i)
 
         non_minimal_points = class_scores_i > 0.001
 
         class_scores_i = class_scores_i[non_minimal_points]
         boxes_i = boxes_i[non_minimal_points]
-        centerness_i = centerness_i[non_minimal_points]
         class_indices_i = class_indices_i[non_minimal_points]
 
         num_detections = min(class_scores_i.shape[0], max_detections)
@@ -241,7 +214,6 @@ def _gather_detections(classes, centernesses, boxes, max_detections=DEFAULT_MAX_
         top_boxes_i = top_boxes_i[boxes_to_keep]
         top_classes_i = top_classes_i[boxes_to_keep]
         top_scores_i = top_scores_i[boxes_to_keep]
-
         boxes_by_batch.append(top_boxes_i)
         classes_by_batch.append(top_classes_i)
         scores_by_batch.append(top_scores_i)
@@ -268,13 +240,3 @@ def tensor_to_image(tensor: torch.Tensor) -> np.ndarray:
     
     return img
 
-
-def _render_targets_to_image(img: np.ndarray, box_labels: torch.Tensor):
-    """Render ground truth boxes on image"""
-    img = np.ascontiguousarray(img, dtype=np.uint8)
-    for i in range(box_labels.shape[0]):
-        x1, y1, x2, y2 = box_labels[i].tolist()
-        pt1 = (int(round(x1)), int(round(y1)))
-        pt2 = (int(round(x2)), int(round(y2)))
-        cv2.rectangle(img, pt1, pt2, (255, 0, 0), 1)
-    return img
