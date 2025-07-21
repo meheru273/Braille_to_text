@@ -202,7 +202,7 @@ class FPN(nn.Module):
         
          # Build FPN pyramid (top-down)
         p5 = self.lateral_convs[3](c5)
-        p5 = self.coord_attention[1](p5)
+        # p5 = self.coord_attention[1](p5)
         
         p4 = self.lateral_convs[2](c4) + _upsample(p5, c4.shape[2:])
         p3 = self.lateral_convs[1](c3) + _upsample(p4, c3.shape[2:])

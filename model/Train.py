@@ -156,7 +156,7 @@ def train(train_dir: pathlib.Path, val_dir: pathlib.Path, writer, resume_ckpt_pa
         
         for batch_idx, (x, class_labels, box_labels) in enumerate(train_loader):
             # Memory management - clear cache before each batch
-            if batch_idx % 10 == 0:  # Less frequent clearing to reduce overhead
+            if batch_idx > 0:  # Less frequent clearing to reduce overhead
                 torch.cuda.empty_cache()
                 gc.collect()
             
