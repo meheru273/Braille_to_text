@@ -79,8 +79,9 @@ class CoordinateAttention(nn.Module):
         self.conv_w = nn.Conv2d(mip, channels, 1)
     
     def forward(self, x):
-        # Much more memory-efficient than CBAM
         n, c, h, w = x.size()
+        
+        # Memory-efficient implementation
         x_h = self.pool_h(x)
         x_w = self.pool_w(x).permute(0, 1, 3, 2)
         
@@ -89,4 +90,12 @@ class CoordinateAttention(nn.Module):
         x_h, x_w = torch.split(y, [h, w], dim=2)
         x_w = x_w.permute(0, 1, 3, 2)
         
-        return x * torch.sigmoid(self.conv_h(x_h)) * torch.sigmoid(self.conv_w(x_w))
+        # Compute attention weights separately to save memory
+        att_h = torch.sigmoid(self.conv_h(x_h))
+        att_w = torch.sigmoid(self.conv_w(x_w))
+        
+        # Apply attention in-place to save memory
+        x = x * att_h
+        x = x * att_w
+        
+        return x

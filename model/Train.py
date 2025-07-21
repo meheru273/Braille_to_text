@@ -18,8 +18,9 @@ from Dataset import DSBIData, COCOData, collate_fn
 
 logger = logging.getLogger(__name__)
 
-# Enhanced memory configuration
-os.environ['PYTORCH_CUDA_ALLOC_CONF'] = 'max_split_size_mb:128'
+import os
+os.environ['PYTORCH_CUDA_ALLOC_CONF'] = 'max_split_size_mb:128,expandable_segments:True'
+
 torch.cuda.set_per_process_memory_fraction(0.75)  # Reduced from 0.80 for safety
 torch.backends.cudnn.benchmark = True  # Optimize cudnn for consistent input sizes
 
@@ -52,7 +53,7 @@ def train(train_dir: pathlib.Path, val_dir: pathlib.Path, writer, resume_ckpt_pa
     Memory-optimized training function with proper autocast and GradScaler usage
     """
     # Training hyperparameters
-    BATCH_SIZE = 2
+    BATCH_SIZE = 1
     IMAGE_SIZE = (800, 1200)
     BASE_LR = 1e-4
     NUM_EPOCHS = 50
