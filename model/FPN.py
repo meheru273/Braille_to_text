@@ -202,12 +202,12 @@ class FPN(nn.Module):
         
          # Build FPN pyramid (top-down)
         p5 = self.lateral_convs[3](c5)
-        # p5 = self.coord_attention[1](p5)
+        p5 = self.coord_attention[1](p5)
         
         p4 = self.lateral_convs[2](c4) + _upsample(p5, c4.shape[2:])
         p3 = self.lateral_convs[1](c3) + _upsample(p4, c3.shape[2:])
         p2 = self.lateral_convs[0](c2) + _upsample(p3, c2.shape[2:])
-        # p2 = self.coord_attention[0](p2)
+        p2 = self.coord_attention[0](p2)
         
         # Generate P6 level
         p6 = self.extra_convs[0](p5)
@@ -235,7 +235,7 @@ class FPN(nn.Module):
             classes_by_feature.append(classes)
             regression_by_feature.append(bbox_pred)
             
-            del cls_features, reg_features, cls_pred, bbox_pred
+        
         
         return classes_by_feature, regression_by_feature
 
