@@ -72,9 +72,7 @@ def generate_targets(img_shape, class_labels_by_batch, box_labels_by_batch, stri
                             box_target[batch_idx, y, x] = torch.tensor([left, top, right, bottom], device=device)
                             positive_locations += 1
             
-            # ✅ ADDED: Cleanup intermediate tensors
-            del boxes_tensor, labels_tensor
-        
+            
         print(f" Level {level_idx}: {positive_locations} positive locations assigned")
         
         class_targets.append(cls_target)
