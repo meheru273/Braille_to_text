@@ -120,8 +120,8 @@ class FPN(nn.Module):
 
 
         self.coord_attention = nn.ModuleList([   
-            CoordinateAttention(256, reduction=16),  # P2 (highest resolution)
-            CoordinateAttention(256, reduction=16),  # P5 (deepest features)
+            CoordinateAttention(64, reduction=16),  # P2 (highest resolution)
+            CoordinateAttention(512, reduction=16),  # P5 (deepest features)
         ])
         
         

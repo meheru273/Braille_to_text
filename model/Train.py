@@ -23,6 +23,9 @@ from Dataset import DSBIData ,COCOData ,collate_fn
 import gc
 from torch.cuda.amp import autocast, GradScaler
 
+import os
+os.environ['PYTORCH_CUDA_ALLOC_CONF'] = 'max_split_size_mb:128'
+torch.cuda.set_per_process_memory_fraction(0.80)
 
 def tensor_to_image(tensor):
     """Convert tensor to numpy array for visualization"""
