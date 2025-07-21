@@ -48,6 +48,47 @@ def create_optimizer(model, base_lr=1e-4):
     
     return optimizer
 
+
+
+import psutil
+import gc
+
+def detailed_memory_report(stage_name):
+    """Comprehensive memory reporting"""
+    if torch.cuda.is_available():
+        # GPU memory
+        allocated = torch.cuda.memory_allocated() / (1024**3)
+        reserved = torch.cuda.memory_reserved() / (1024**3)
+        max_allocated = torch.cuda.max_memory_allocated() / (1024**3)
+        
+        print(f"[{stage_name}] GPU Memory:")
+        print(f"  Allocated: {allocated:.2f}GB")
+        print(f"  Reserved: {reserved:.2f}GB") 
+        print(f"  Max Allocated: {max_allocated:.2f}GB")
+        
+        # Check for unreleased tensors
+        tensor_count = 0
+        total_tensor_memory = 0
+        for obj in gc.get_objects():
+            if isinstance(obj, torch.Tensor) and obj.is_cuda:
+                tensor_count += 1
+                total_tensor_memory += obj.numel() * obj.element_size()
+        
+        print(f"  Live CUDA tensors: {tensor_count}")
+        print(f"  Tensor memory: {total_tensor_memory / (1024**3):.2f}GB")
+    
+    # System memory
+    process = psutil.Process()
+    ram_mb = process.memory_info().rss / (1024**2)
+    print(f"  System RAM: {ram_mb:.1f}MB")
+    print()
+    
+    
+
+
+
+
+
 def train(train_dir: pathlib.Path, val_dir: pathlib.Path, writer, resume_ckpt_path=None):
     """
     Memory-optimized training function with proper autocast and GradScaler usage
@@ -147,9 +188,12 @@ def train(train_dir: pathlib.Path, val_dir: pathlib.Path, writer, resume_ckpt_pa
     
     for epoch in range(start_epoch, NUM_EPOCHS + 1):
         logger.info(f"Epoch {epoch}/{NUM_EPOCHS} start")
-        
+        test_dataloader_memory()
         # =================== TRAINING PHASE ===================
         model.train()
+        
+        print("=== Initial Memory State ===")
+        detailed_memory_report("Before Training")
         epoch_losses = []
         epoch_cls_losses = []
         epoch_reg_losses = []
@@ -321,3 +365,39 @@ if __name__ == "__main__":
     resume_ckpt_path = None  # or path to checkpoint
     
     train(train_dir, val_dir, writer, resume_ckpt_path)
+
+
+def test_dataloader_memory():
+    """Test if DataLoader is causing memory leaks"""
+    print("=== Testing DataLoader Memory ===")
+    
+    # Test with different configurations
+    configs = [
+        {"num_workers": 0, "pin_memory": False},
+        {"num_workers": 0, "pin_memory": True},
+        {"num_workers": 2, "pin_memory": False},
+        {"num_workers": 2, "pin_memory": True},
+    ]
+    
+    for config in configs:
+        print(f"Testing config: {config}")
+        detailed_memory_report("Before DataLoader Creation")
+        
+        test_loader = DataLoader(
+            train_dataset,
+            batch_size=1,
+            **config,
+            collate_fn=collate_fn
+        )
+        detailed_memory_report("After DataLoader Creation")
+        
+        # Load one batch
+        batch = next(iter(test_loader))
+        detailed_memory_report("After Loading One Batch")
+        
+        # Clean up
+        del batch, test_loader
+        torch.cuda.empty_cache()
+        gc.collect()
+        detailed_memory_report("After Cleanup")
+        print("---")
