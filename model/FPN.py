@@ -234,7 +234,6 @@ class FPN(nn.Module):
             classes_by_feature.append(classes)
             regression_by_feature.append(bbox_pred)
             
-        del cls_features, reg_features, cls_pred, bbox_pred
         
         return classes_by_feature, regression_by_feature
 

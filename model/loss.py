@@ -23,7 +23,7 @@ def _compute_loss(
         cls_t = class_targets[idx].to(device)  # [B, H_target, W_target]
         box_t = box_targets[idx].to(device)   # [B, H_target, W_target, 4]
 
-        # ✅ CRITICAL: Ensure matching dimensions
+        # CRITICAL: Ensure matching dimensions
         B, H_pred, W_pred = cls_p.shape[:3]
         
         if len(cls_t.shape) == 3:  # [B, H_target, W_target]
@@ -32,7 +32,7 @@ def _compute_loss(
             print(f"Warning: Unexpected target shape at level {idx}: {cls_t.shape}")
             continue
 
-        # ✅ Resize targets to match predictions if needed
+        # Resize targets to match predictions if needed
         if (H_pred, W_pred) != (H_target, W_target):
             print(f"Resizing targets from ({H_target}, {W_target}) to ({H_pred}, {W_pred})")
             
@@ -45,7 +45,7 @@ def _compute_loss(
                 box_t = F.interpolate(box_t.permute(0, 3, 1, 2), size=(H_pred, W_pred),
                                       mode='bilinear', align_corners=False).permute(0, 2, 3, 1)
 
-        # ✅ CRITICAL: Cast to FP32 and flatten consistently
+
         cls_p_flat = cls_p.view(-1, num_classes).float()  # [B*H*W, num_classes]
         cls_t_flat = cls_t.view(-1).long()                # [B*H*W]
         box_p_flat = box_p.view(-1, 4).float()           # [B*H*W, 4]
