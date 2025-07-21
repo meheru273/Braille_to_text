@@ -15,7 +15,7 @@ class COCOData(Dataset):
     """
     def __init__(self,
                  split_dir: pathlib.Path,
-                 image_size=(800, 1200),
+                 image_size=(700, 1024),
                  min_area=2,
                  max_detections=None):
         self.split_dir = pathlib.Path(split_dir)

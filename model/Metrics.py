@@ -251,7 +251,7 @@ def evaluate_model(test_dir: pathlib.Path, model_path: pathlib.Path, confidence_
     Returns:
         Dictionary containing all evaluation metrics
     """
-    IMAGE_SIZE = (800, 1200)
+    IMAGE_SIZE = (700, 1024)
     
     # Validate paths
     test_dir = pathlib.Path(test_dir)

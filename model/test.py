@@ -92,7 +92,7 @@ def main():
         orig_shape = img_rgb.shape
         print(f"[OK] Loaded image: {orig_shape}")
         
-        img_resized, scale = smart_resize(img_rgb, max_size=(800, 1200))
+        img_resized, scale = smart_resize(img_rgb, max_size=(700, 1024))
         print(f"[OK] Resized image: {img_resized.shape}")
         
         # Define H, W in the same scope as detection processing

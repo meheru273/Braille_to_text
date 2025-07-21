@@ -9,7 +9,6 @@ from torch.utils.data import Dataset, DataLoader
 import gc
 from torch.cuda.amp import autocast, GradScaler
 
-
 # Import existing functions from your modules
 from inference import detections_from_network_output
 from FPN import FPN, normalize_batch, FocalLoss
@@ -17,41 +16,19 @@ from Targets import generate_targets
 from loss import _compute_loss
 from Dataset import DSBIData, COCOData, collate_fn
 
-
 logger = logging.getLogger(__name__)
-
 
 import os
 os.environ['PYTORCH_CUDA_ALLOC_CONF'] = 'max_split_size_mb:128,expandable_segments:True'
 
-
 torch.cuda.set_per_process_memory_fraction(0.75)  # Reduced from 0.80 for safety
 torch.backends.cudnn.benchmark = True  # Optimize cudnn for consistent input sizes
-
-
-def print_memory_stats(prefix=""):
-    """Print detailed GPU memory statistics"""
-    if torch.cuda.is_available():
-        allocated = torch.cuda.memory_allocated() / 1024**2  # MB
-        reserved = torch.cuda.memory_reserved() / 1024**2   # MB
-        max_allocated = torch.cuda.max_memory_allocated() / 1024**2  # MB
-        max_reserved = torch.cuda.max_memory_reserved() / 1024**2    # MB
-        
-        print(f"[MEMORY {prefix}] Allocated: {allocated:.2f}MB | Reserved: {reserved:.2f}MB | "
-              f"Max Allocated: {max_allocated:.2f}MB | Max Reserved: {max_reserved:.2f}MB")
-        
-        # Get memory summary for more detailed info
-        if allocated > 1000:  # Only show detailed summary if using significant memory
-            print(f"[MEMORY {prefix}] GPU Memory Summary:")
-            print(torch.cuda.memory_summary())
-
 
 def tensor_to_image(tensor):
     """Convert tensor to numpy array for visualization"""
     img = tensor.cpu().numpy().transpose(1, 2, 0)
     img = (img * 255).clip(0, 255).astype(np.uint8)
     return img
-
 
 def create_optimizer(model, base_lr=1e-4):
     """Create optimizer with different learning rates for backbone and new layers"""
@@ -71,18 +48,15 @@ def create_optimizer(model, base_lr=1e-4):
     
     return optimizer
 
-
 def train(train_dir: pathlib.Path, val_dir: pathlib.Path, writer, resume_ckpt_path=None):
     """
-    Memory-optimized training function with comprehensive memory tracking
+    Memory-optimized training function with proper autocast and GradScaler usage
     """
     # Training hyperparameters
     BATCH_SIZE = 2
-    IMAGE_SIZE = (800, 1200)
+    IMAGE_SIZE = (700, 1024)
     BASE_LR = 1e-4
     NUM_EPOCHS = 50
-    
-    print_memory_stats("INITIALIZATION_START")
     
     # Ensure paths exist
     train_dir = pathlib.Path(train_dir)
@@ -96,7 +70,6 @@ def train(train_dir: pathlib.Path, val_dir: pathlib.Path, writer, resume_ckpt_pa
     print("Creating datasets...")
     train_dataset = COCOData(train_dir, image_size=IMAGE_SIZE, min_area=2)
     val_dataset = COCOData(val_dir, image_size=IMAGE_SIZE, min_area=2)
-    print_memory_stats("AFTER_DATASET_CREATION")
     
     num_classes = train_dataset.get_num_classes()
     class_names = train_dataset.get_class_names()
@@ -121,17 +94,13 @@ def train(train_dir: pathlib.Path, val_dir: pathlib.Path, writer, resume_ckpt_pa
         pin_memory=True,
         persistent_workers=True
     )
-    print_memory_stats("AFTER_DATALOADER_CREATION")
     
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"Using device: {device}")
     
     print("Creating model...")
     model = FPN(num_classes=num_classes)
-    print_memory_stats("AFTER_MODEL_CREATION")
-    
     model.to(device)
-    print_memory_stats("AFTER_MODEL_TO_DEVICE")
     
     # Enable mixed precision training optimizations
     if hasattr(torch.backends.cudnn, 'allow_tf32'):
@@ -147,7 +116,6 @@ def train(train_dir: pathlib.Path, val_dir: pathlib.Path, writer, resume_ckpt_pa
         backoff_factor=0.5,
         growth_interval=2000
     )
-    print_memory_stats("AFTER_OPTIMIZER_CREATION")
     
     # Learning rate scheduler
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=NUM_EPOCHS)
@@ -168,19 +136,16 @@ def train(train_dir: pathlib.Path, val_dir: pathlib.Path, writer, resume_ckpt_pa
         start_epoch = checkpoint['epoch'] + 1
         print(f"✅ Training will resume from epoch {start_epoch}")
         logger.info(f"Resuming training from epoch {start_epoch}")
-        print_memory_stats("AFTER_CHECKPOINT_LOAD")
     else:
         print("Starting training from scratch")
     
     # Initialize focal loss
     focal_loss = FocalLoss(alpha="auto", gamma=2.0, num_classes=num_classes, reduction='mean')
     focal_loss.calculate_auto_alpha(train_dataset)
-    print_memory_stats("AFTER_FOCAL_LOSS_INIT")
     
     print(f"Starting training from epoch {start_epoch} to {NUM_EPOCHS}...")
     
     for epoch in range(start_epoch, NUM_EPOCHS + 1):
-        print_memory_stats(f"EPOCH_{epoch}_START")
         logger.info(f"Epoch {epoch}/{NUM_EPOCHS} start")
         
         # =================== TRAINING PHASE ===================
@@ -190,93 +155,51 @@ def train(train_dir: pathlib.Path, val_dir: pathlib.Path, writer, resume_ckpt_pa
         epoch_reg_losses = []
         
         for batch_idx, (x, class_labels, box_labels) in enumerate(train_loader):
-            print_memory_stats(f"BATCH_{batch_idx}_START")
-            
             # Memory management - clear cache before each batch
             if batch_idx > 0:  # Less frequent clearing to reduce overhead
                 torch.cuda.empty_cache()
                 gc.collect()
-                print_memory_stats(f"BATCH_{batch_idx}_AFTER_CLEANUP")
             
             # Move data to device with non_blocking for efficiency
-            print(f"[MEMORY] Input tensor shape: {x.shape}, dtype: {x.dtype}")
-            print_memory_stats(f"BATCH_{batch_idx}_BEFORE_TO_DEVICE")
-            
             x = x.to(device, non_blocking=True)
-            print_memory_stats(f"BATCH_{batch_idx}_AFTER_TO_DEVICE")
-            
             print(f"Batch {batch_idx} of epoch {epoch}")
             
             # Zero gradients
-            print_memory_stats(f"BATCH_{batch_idx}_BEFORE_ZERO_GRAD")
             optimizer.zero_grad(set_to_none=True)  # More memory efficient than zero_grad()
-            print_memory_stats(f"BATCH_{batch_idx}_AFTER_ZERO_GRAD")
             
             # =================== FORWARD PASS WITH AUTOCAST ===================
-            print_memory_stats(f"BATCH_{batch_idx}_BEFORE_FORWARD")
             with torch.amp.autocast(device_type='cuda', dtype=torch.float16):
-                # Normalize batch
-                print_memory_stats(f"BATCH_{batch_idx}_BEFORE_NORMALIZE")
                 batch_norm = normalize_batch(x)
-                print_memory_stats(f"BATCH_{batch_idx}_AFTER_NORMALIZE")
-                
-                # Model forward pass
-                print_memory_stats(f"BATCH_{batch_idx}_BEFORE_MODEL_FORWARD")
                 cls_pred, box_pred = model(batch_norm)
-                print_memory_stats(f"BATCH_{batch_idx}_AFTER_MODEL_FORWARD")
                 
-                # Log prediction tensor sizes
-                print(f"[MEMORY] cls_pred shape: {cls_pred.shape}, dtype: {cls_pred.dtype}")
-                print(f"[MEMORY] box_pred shape: {box_pred.shape}, dtype: {box_pred.dtype}")
-                
-                # Generate targets - This is where you mentioned issues occur
-                print_memory_stats(f"BATCH_{batch_idx}_BEFORE_GENERATE_TARGETS")
                 class_t, box_t = generate_targets(
                     x.shape, class_labels, box_labels, model.strides
                 )
-                print_memory_stats(f"BATCH_{batch_idx}_AFTER_GENERATE_TARGETS")
                 
-                # Log target tensor sizes
-                print(f"[MEMORY] class_t shape: {class_t.shape}, dtype: {class_t.dtype}")
-                print(f"[MEMORY] box_t shape: {box_t.shape}, dtype: {box_t.dtype}")
-                
-                # Compute loss
-                print_memory_stats(f"BATCH_{batch_idx}_BEFORE_LOSS_COMPUTE")
                 total_loss, cls_loss, reg_loss = _compute_loss(
                     cls_pred, box_pred, class_t, box_t, focal_loss,
                     box_labels_by_batch=box_labels,
                     img_shape=x.shape,
                     strides=model.strides,
                 )
-                print_memory_stats(f"BATCH_{batch_idx}_AFTER_LOSS_COMPUTE")
-            
-            print_memory_stats(f"BATCH_{batch_idx}_AFTER_FORWARD")
             
             # Check for NaN losses
             if not torch.isfinite(total_loss):
                 print(f"Warning: Non-finite loss detected at epoch {epoch}, batch {batch_idx}")
-                print_memory_stats(f"BATCH_{batch_idx}_NAN_LOSS_DETECTED")
                 continue
             
             # =================== BACKWARD PASS WITH GRADSCALER ===================
-            print_memory_stats(f"BATCH_{batch_idx}_BEFORE_BACKWARD")
             scaler.scale(total_loss).backward()
-            print_memory_stats(f"BATCH_{batch_idx}_AFTER_BACKWARD")
             
             # Unscale gradients for clipping
-            print_memory_stats(f"BATCH_{batch_idx}_BEFORE_UNSCALE")
             scaler.unscale_(optimizer)
-            print_memory_stats(f"BATCH_{batch_idx}_AFTER_UNSCALE")
             
             # Gradient clipping
             torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=10.0)
-            print_memory_stats(f"BATCH_{batch_idx}_AFTER_GRAD_CLIP")
             
             # Optimizer step with scaler
-            print_memory_stats(f"BATCH_{batch_idx}_BEFORE_OPTIMIZER_STEP")
             scaler.step(optimizer)
             scaler.update()
-            print_memory_stats(f"BATCH_{batch_idx}_AFTER_OPTIMIZER_STEP")
             
             # Track losses
             epoch_losses.append(total_loss.item())
@@ -284,19 +207,10 @@ def train(train_dir: pathlib.Path, val_dir: pathlib.Path, writer, resume_ckpt_pa
             epoch_reg_losses.append(reg_loss.item())
             
             # Clear references for memory efficiency
-            print_memory_stats(f"BATCH_{batch_idx}_BEFORE_DELETE_TENSORS")
-            del total_loss, cls_loss, reg_loss, cls_pred, box_pred, batch_norm, class_t, box_t
-            print_memory_stats(f"BATCH_{batch_idx}_AFTER_DELETE_TENSORS")
-            
-            # Force garbage collection and cache clearing after every few batches
-            if batch_idx % 5 == 0:
-                torch.cuda.empty_cache()
-                gc.collect()
-                print_memory_stats(f"BATCH_{batch_idx}_AFTER_INTENSIVE_CLEANUP")
+            del total_loss, cls_loss, reg_loss, cls_pred, box_pred, batch_norm
         
         # Update learning rate
         scheduler.step()
-        print_memory_stats(f"EPOCH_{epoch}_AFTER_SCHEDULER_STEP")
         
         # Calculate average losses
         avg_loss = np.mean(epoch_losses)
@@ -312,7 +226,6 @@ def train(train_dir: pathlib.Path, val_dir: pathlib.Path, writer, resume_ckpt_pa
         
         # =================== VALIDATION PHASE ===================
         if epoch % 5 == 0:
-            print_memory_stats(f"EPOCH_{epoch}_VALIDATION_START")
             model.eval()
             val_losses = []
             
@@ -321,24 +234,17 @@ def train(train_dir: pathlib.Path, val_dir: pathlib.Path, writer, resume_ckpt_pa
                     if i >= 5:  # Limit validation samples
                         break
                     
-                    print_memory_stats(f"VAL_{i}_START")
                     x = x.to(device, non_blocking=True)
-                    print_memory_stats(f"VAL_{i}_AFTER_TO_DEVICE")
                     
                     # Use autocast for validation too (memory efficient)
                     with autocast(device_type='cuda', dtype=torch.float16):
                         batch_norm = normalize_batch(x)
-                        print_memory_stats(f"VAL_{i}_AFTER_NORMALIZE")
-                        
                         cls_pred, box_pred = model(batch_norm)
-                        print_memory_stats(f"VAL_{i}_AFTER_FORWARD")
                         
                         # Optional: compute validation loss
                         class_t, box_t = generate_targets(
                             x.shape, class_labels, box_labels, model.strides
                         )
-                        print_memory_stats(f"VAL_{i}_AFTER_TARGETS")
-                        
                         val_loss, _, _ = _compute_loss(
                             cls_pred, box_pred, class_t, box_t, focal_loss,
                             box_labels_by_batch=box_labels,
@@ -346,31 +252,25 @@ def train(train_dir: pathlib.Path, val_dir: pathlib.Path, writer, resume_ckpt_pa
                             strides=model.strides,
                         )
                         val_losses.append(val_loss.item())
-                        print_memory_stats(f"VAL_{i}_AFTER_LOSS")
                     
                     # Generate detections for evaluation
                     H, W = x.shape[2], x.shape[3]
                     detections = detections_from_network_output(
                         H, W, cls_pred, box_pred, model.scales, model.strides
                     )
-                    print_memory_stats(f"VAL_{i}_AFTER_DETECTIONS")
                     
                     print(f"Validation image {i}: {len(detections[0])} detections, "
                           f"{len(box_labels[0])} ground truth boxes")
                     
                     # Clear validation tensors
-                    del cls_pred, box_pred, batch_norm, val_loss, class_t, box_t
-                    print_memory_stats(f"VAL_{i}_AFTER_CLEANUP")
+                    del cls_pred, box_pred, batch_norm, val_loss
             
             if val_losses:
                 avg_val_loss = np.mean(val_losses)
                 print(f"  Avg Validation Loss: {avg_val_loss:.4f}")
-            
-            print_memory_stats(f"EPOCH_{epoch}_VALIDATION_END")
         
         # =================== CHECKPOINT SAVING ===================
         if epoch % 5 == 0 or epoch == NUM_EPOCHS:
-            print_memory_stats(f"EPOCH_{epoch}_BEFORE_CHECKPOINT_SAVE")
             checkpoint_dir = os.path.join(writer.log_dir, "checkpoints")
             os.makedirs(checkpoint_dir, exist_ok=True)
             
@@ -401,16 +301,10 @@ def train(train_dir: pathlib.Path, val_dir: pathlib.Path, writer, resume_ckpt_pa
             torch.save(checkpoint, ckpt_path)
             logger.info(f"Saved checkpoint {ckpt_path}")
             print(f"Checkpoint saved: {ckpt_path}")
-            print_memory_stats(f"EPOCH_{epoch}_AFTER_CHECKPOINT_SAVE")
         
         # Final memory cleanup at end of epoch
         torch.cuda.empty_cache()
         gc.collect()
-        print_memory_stats(f"EPOCH_{epoch}_END")
-        
-        # Reset memory stats for next epoch
-        torch.cuda.reset_peak_memory_stats()
-
 
 # Usage remains the same
 if __name__ == "__main__":
