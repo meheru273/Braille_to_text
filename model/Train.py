@@ -52,7 +52,7 @@ def create_optimizer(model, base_lr=1e-4):
 
 def train(train_dir: pathlib.Path, val_dir: pathlib.Path, writer, resume_ckpt_path=None):
     """
-    Enhanced training function with resume capability and fixed attention loss tracking
+    Enhanced training function with resume capability 
     """
     # Training hyperparameters optimized for small Braille characters
     BATCH_SIZE = 2
@@ -148,17 +148,15 @@ def train(train_dir: pathlib.Path, val_dir: pathlib.Path, writer, resume_ckpt_pa
             print("batch no :", batch_idx, "of epoch", epoch)
             
             # ✅ NEW CODE with gradient scaler
-            with torch.amp.autocast():
+            with torch.amp.autocast(device_type='cuda'):
                 batch_norm = normalize_batch(x)
                 cls_pred, box_pred = model(batch_norm)
                 class_t, box_t = generate_targets(x.shape, class_labels, box_labels, model.strides)
-                total_loss, cls_loss, reg_loss, att_loss = _compute_loss(
+                total_loss, cls_loss, reg_loss = _compute_loss(
                     cls_pred, box_pred, class_t, box_t, focal_loss,
-                    attention_maps=model.attention_maps,
                     box_labels_by_batch=box_labels,
                     img_shape=x.shape,
                     strides=model.strides,
-                    attention_weight=0.1
                 )
 
             scaler.scale(total_loss).backward()
@@ -172,7 +170,6 @@ def train(train_dir: pathlib.Path, val_dir: pathlib.Path, writer, resume_ckpt_pa
             epoch_losses.append(total_loss.item())
             epoch_cls_losses.append(cls_loss.item())
             epoch_reg_losses.append(reg_loss.item())
-            epoch_att_losses.append(att_loss.item())
         
         # Update learning rate
         scheduler.step()
@@ -181,15 +178,13 @@ def train(train_dir: pathlib.Path, val_dir: pathlib.Path, writer, resume_ckpt_pa
         avg_loss = np.mean(epoch_losses)
         avg_cls_loss = np.mean(epoch_cls_losses)
         avg_reg_loss = np.mean(epoch_reg_losses)
-        avg_att_loss = np.mean(epoch_att_losses)
         
         # Log losses
         print(f"Epoch {epoch} completed:")
         print(f"  Avg Total Loss: {avg_loss:.4f}")
         print(f"  Avg Cls Loss: {avg_cls_loss:.4f}")
         print(f"  Avg Reg Loss: {avg_reg_loss:.4f}")
-        print(f"  Avg Att Loss: {avg_att_loss:.4f}")
-        
+
         
         # Validation phase
         if epoch % 5 == 0:
@@ -230,7 +225,6 @@ def train(train_dir: pathlib.Path, val_dir: pathlib.Path, writer, resume_ckpt_pa
                     'total': avg_loss,
                     'classification': avg_cls_loss,
                     'regression': avg_reg_loss,
-                    'attention': avg_att_loss
                 },
                 'hyperparameters': {
                     'batch_size': BATCH_SIZE,

@@ -1,22 +1,28 @@
 from typing import Tuple, List
 import torch  # ← ADD THIS LINE
 import math
-def generate_targets(img_shape, class_labels_by_batch, box_labels_by_batch, strides):
 
+
+def generate_targets(img_shape, class_labels_by_batch, box_labels_by_batch, strides):
+    """Fixed target generation with proper debugging"""
+    
     batch_size, _, img_h, img_w = img_shape
+    print(f" Input image shape: {img_shape}")
     
     class_targets = []
     box_targets = []
     
-    # Use original FCOS size ranges
-    size_ranges = [ (0, 32), (16, 64), (32, 128), (64, 256), (128, float('inf'))]
-    
     for level_idx, stride in enumerate(strides):
         feat_h, feat_w = img_h // stride, img_w // stride
         
+        # ✅ Initialize targets
         cls_target = torch.zeros((batch_size, feat_h, feat_w), dtype=torch.long)
-        cen_target = torch.zeros((batch_size, feat_h, feat_w), dtype=torch.float32)
         box_target = torch.zeros((batch_size, feat_h, feat_w, 4), dtype=torch.float32)
+        
+        print(f" Level {level_idx} (stride={stride}): feature map size ({feat_h}, {feat_w})")
+        print(f" Target shapes: cls_target={cls_target.shape}, box_target={box_target.shape}")
+        
+        positive_locations = 0  # Debug counter
         
         for batch_idx, (labels, boxes) in enumerate(zip(class_labels_by_batch, box_labels_by_batch)):
             if len(boxes) == 0:
@@ -25,77 +31,56 @@ def generate_targets(img_shape, class_labels_by_batch, box_labels_by_batch, stri
             for obj_idx, (label, box) in enumerate(zip(labels, boxes)):
                 x1, y1, x2, y2 = box
                 w, h = x2 - x1, y2 - y1
-                max_side = max(w, h)
                 
-                # if not (min_size <= max_side < max_size):
+                # ✅ Add size filtering (optional - uncomment if needed)
+                # max_side = max(w, h)
+                # size_range = get_size_range_for_level(level_idx)  # You can implement this
+                # if not (size_range[0] <= max_side < size_range[1]):
                 #     continue
                 
-                # Find all feature map locations inside this box
+                # ✅ Improved feature map coordinate calculation
+                # Use floating point for more accurate mapping
                 feat_x1 = max(0, int(x1 / stride))
                 feat_y1 = max(0, int(y1 / stride))
-                feat_x2 = min(feat_w, int(x2 / stride) + 1)
-                feat_y2 = min(feat_h, int(y2 / stride) + 1)
+                feat_x2 = min(feat_w, int((x2 - 1) / stride) + 1)  # ✅ Fixed boundary
+                feat_y2 = min(feat_h, int((y2 - 1) / stride) + 1)  # ✅ Fixed boundary
                 
                 for feat_y in range(feat_y1, feat_y2):
                     for feat_x in range(feat_x1, feat_x2):
-                        # Convert back to image coordinates
+                        # ✅ More precise coordinate mapping
                         img_x = feat_x * stride + stride // 2
                         img_y = feat_y * stride + stride // 2
                         
-                        # Check if this location is inside the box
-                        if x1 <= img_x <= x2 and y1 <= img_y <= y2:
+                        # ✅ Improved bounds checking
+                        if (x1 <= img_x <= x2 and y1 <= img_y <= y2):
                             # Calculate distances to box edges
                             left = img_x - x1
                             top = img_y - y1
                             right = x2 - img_x
                             bottom = y2 - img_y
                             
+                            # ✅ Ensure all distances are positive
                             if left > 0 and top > 0 and right > 0 and bottom > 0:
                                 # Assign positive label
                                 cls_target[batch_idx, feat_y, feat_x] = label
                                 
-                               
+                                # ✅ Direct tensor assignment (more efficient)
+                                box_target[batch_idx, feat_y, feat_x, 0] = left / stride
+                                box_target[batch_idx, feat_y, feat_x, 1] = top / stride
+                                box_target[batch_idx, feat_y, feat_x, 2] = right / stride
+                                box_target[batch_idx, feat_y, feat_x, 3] = bottom / stride
                                 
-                                # Box regression targets (normalized by stride)
-                                box_target[batch_idx, feat_y, feat_x] = torch.tensor([
-                                    left / stride, top / stride, right / stride, bottom / stride
-                                ])
+                                positive_locations += 1
+        
+        print(f" Level {level_idx}: {positive_locations} positive locations assigned")
         
         class_targets.append(cls_target)
         box_targets.append(box_target)
     
+    # ✅ Debug: Print final target list information
+    print(f" Generated targets for {len(class_targets)} levels")
+    for i, (cls_t, box_t) in enumerate(zip(class_targets, box_targets)):
+        print(f"Level {i}: cls_target {cls_t.shape}, box_target {box_t.shape}")
+        print(f"Level {i}: positive samples = {(cls_t > 0).sum().item()}")
+    
     return class_targets, box_targets
-
-
-def generate_attention_targets(img_shape, box_labels_by_batch, strides):
-    """
-    Simple attention targets - just binary masks showing where objects are
-    """
-    batch_size, _, img_h, img_w = img_shape
-    attention_targets = []
-    
-    for stride in strides:
-        feat_h, feat_w = img_h // stride, img_w // stride
-        
-        # Create binary attention target (0 = background, 1 = object region)
-        attention_target = torch.zeros((batch_size, feat_h, feat_w), dtype=torch.float32)
-        
-        for batch_idx, boxes in enumerate(box_labels_by_batch):
-            if len(boxes) == 0:
-                continue
-                
-            for box in boxes:
-                x1, y1, x2, y2 = box
-                
-                # Find feature map locations inside this box (same as your logic)
-                feat_x1 = max(0, int(x1 / stride))
-                feat_y1 = max(0, int(y1 / stride))
-                feat_x2 = min(feat_w, int(x2 / stride) + 1)
-                feat_y2 = min(feat_h, int(y2 / stride) + 1)
-                
-                # Simply mark this region as 1 (object present)
-                attention_target[batch_idx, feat_y1:feat_y2, feat_x1:feat_x2] = 1.0
-        
-        attention_targets.append(attention_target)
-    
-    return attention_targets
