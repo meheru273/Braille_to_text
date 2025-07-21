@@ -48,86 +48,12 @@ def create_optimizer(model, base_lr=1e-4):
     
     return optimizer
 
-
-
-import psutil
-import gc
-
-def detailed_memory_report(stage_name):
-    """Comprehensive memory reporting"""
-    if torch.cuda.is_available():
-        # GPU memory
-        allocated = torch.cuda.memory_allocated() / (1024**3)
-        reserved = torch.cuda.memory_reserved() / (1024**3)
-        max_allocated = torch.cuda.max_memory_allocated() / (1024**3)
-        
-        print(f"[{stage_name}] GPU Memory:")
-        print(f"  Allocated: {allocated:.2f}GB")
-        print(f"  Reserved: {reserved:.2f}GB") 
-        print(f"  Max Allocated: {max_allocated:.2f}GB")
-        
-        # Check for unreleased tensors
-        tensor_count = 0
-        total_tensor_memory = 0
-        for obj in gc.get_objects():
-            if isinstance(obj, torch.Tensor) and obj.is_cuda:
-                tensor_count += 1
-                total_tensor_memory += obj.numel() * obj.element_size()
-        
-        print(f"  Live CUDA tensors: {tensor_count}")
-        print(f"  Tensor memory: {total_tensor_memory / (1024**3):.2f}GB")
-    
-    # System memory
-    process = psutil.Process()
-    ram_mb = process.memory_info().rss / (1024**2)
-    print(f"  System RAM: {ram_mb:.1f}MB")
-    print()
-    
-    
-def debug_target_generation(img_shape, class_labels, box_labels, strides):
-    """Debug version of generate_targets with memory tracking"""
-    
-    print("=== Target Generation Memory Debug ===")
-    detailed_memory_report("Before Target Generation")
-    
-    batch_size, _, img_h, img_w = img_shape
-    class_targets = []
-    box_targets = []
-    
-    for level_idx, stride in enumerate(strides):
-        detailed_memory_report(f"Before Level {level_idx}")
-        
-        feat_h, feat_w = img_h // stride, img_w // stride
-        
-        # Check tensor creation
-        cls_target = torch.zeros((batch_size, feat_h, feat_w), dtype=torch.long)
-        box_target = torch.zeros((batch_size, feat_h, feat_w, 4), dtype=torch.float32)
-        
-        detailed_memory_report(f"After Creating Targets Level {level_idx}")
-        
-        # ... your existing target generation logic ...
-        
-        class_targets.append(cls_target)
-        box_targets.append(box_target)
-        
-        detailed_memory_report(f"After Level {level_idx}")
-    
-    detailed_memory_report("After All Target Generation")
-    return class_targets, box_targets
-
-# Replace your generate_targets call temporarily:
-# class_t, box_t = debug_target_generation(x.shape, class_labels, box_labels, model.strides)
-
-
-
-
-
 def train(train_dir: pathlib.Path, val_dir: pathlib.Path, writer, resume_ckpt_path=None):
     """
     Memory-optimized training function with proper autocast and GradScaler usage
     """
     # Training hyperparameters
-    BATCH_SIZE = 1
+    BATCH_SIZE = 2
     IMAGE_SIZE = (800, 1200)
     BASE_LR = 1e-4
     NUM_EPOCHS = 50
@@ -168,41 +94,6 @@ def train(train_dir: pathlib.Path, val_dir: pathlib.Path, writer, resume_ckpt_pa
         pin_memory=True,
         persistent_workers=True
     )
-    
-    def test_dataloader_memory():
-        """Test if DataLoader is causing memory leaks"""
-    print("=== Testing DataLoader Memory ===")
-    
-    # Test with different configurations
-    configs = [
-        {"num_workers": 0, "pin_memory": False},
-        {"num_workers": 0, "pin_memory": True},
-        {"num_workers": 2, "pin_memory": False},
-        {"num_workers": 2, "pin_memory": True},
-    ]
-    
-    for config in configs:
-        print(f"Testing config: {config}")
-        detailed_memory_report("Before DataLoader Creation")
-        
-        test_loader = DataLoader(
-            train_dataset,
-            batch_size=1,
-            **config,
-            collate_fn=collate_fn
-        )
-        detailed_memory_report("After DataLoader Creation")
-        
-        # Load one batch
-        batch = next(iter(test_loader))
-        detailed_memory_report("After Loading One Batch")
-        
-        # Clean up
-        del batch, test_loader
-        torch.cuda.empty_cache()
-        gc.collect()
-        detailed_memory_report("After Cleanup")
-        print("---")
     
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"Using device: {device}")
@@ -256,12 +147,9 @@ def train(train_dir: pathlib.Path, val_dir: pathlib.Path, writer, resume_ckpt_pa
     
     for epoch in range(start_epoch, NUM_EPOCHS + 1):
         logger.info(f"Epoch {epoch}/{NUM_EPOCHS} start")
-        test_dataloader_memory()
+        
         # =================== TRAINING PHASE ===================
         model.train()
-        
-        print("=== Initial Memory State ===")
-        detailed_memory_report("Before Training")
         epoch_losses = []
         epoch_cls_losses = []
         epoch_reg_losses = []
@@ -433,5 +321,3 @@ if __name__ == "__main__":
     resume_ckpt_path = None  # or path to checkpoint
     
     train(train_dir, val_dir, writer, resume_ckpt_path)
-
-
