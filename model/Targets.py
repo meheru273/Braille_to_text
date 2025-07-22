@@ -23,7 +23,7 @@ def generate_targets(
     box_targets_by_feature = []
 
     # Size ranges for each pyramid level (proper FCOS ranges)
-    size_ranges = [64, 128, 256, 512, math.inf]
+    size_ranges = [32,64, 128, 256, math.inf]
 
     for level_idx, stride in enumerate(strides):
         feat_h = int(img_shape[2] / stride)
