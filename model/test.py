@@ -82,7 +82,7 @@ def main():
     model = FPN(num_classes=27)
     
     try:
-        ckpt = torch.load("runs/fcos_Cord/fcos_epoch30.pth", map_location=device, weights_only=False)
+        ckpt = torch.load("runs/fcos_Cord/fcos_epoch50.pth", map_location=device, weights_only=False)
         model.load_state_dict(ckpt["model_state"])
         model.to(device)
         model.eval()
@@ -92,7 +92,7 @@ def main():
         return
     
     # 2. Load and preprocess image
-    img_path = "testImage/before2.jpg"
+    img_path = "testImage/before.jpg"
     
     try:
         img_bgr = cv2.imread(img_path)

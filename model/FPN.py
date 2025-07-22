@@ -120,10 +120,10 @@ class FPN(nn.Module):
         self.scales = nn.Parameter(torch.tensor([8.0,6.0, 4.0, 2.5, 2.0]))
 
 
-        self.coord_attention = nn.ModuleList([   
-            CoordinateAttention(256, reduction=16),  # P2 (highest resolution)
-            CoordinateAttention(256, reduction=16),  # P5 (deepest features)
-        ])
+        # self.coord_attention = nn.ModuleList([   
+        #     CoordinateAttention(256, reduction=16),  # P2 (highest resolution)
+        #     CoordinateAttention(256, reduction=16),  # P5 (deepest features)
+        # ])
            
         # Lateral connections for ResNet-50 channels
         self.lateral_convs = nn.ModuleList([
@@ -202,18 +202,12 @@ class FPN(nn.Module):
         
          # Build FPN pyramid (top-down)
         p5 = self.lateral_convs[3](c5)
-        p5 = self.coord_attention[1](p5)
         
         p4 = self.lateral_convs[2](c4) + _upsample(p5, c4.shape[2:])
-        p4 = self.coord_attention[1](p4)
         p3 = self.lateral_convs[1](c3) + _upsample(p4, c3.shape[2:])
-        p3 = self.coord_attention[1](p3)
-        p2 = self.lateral_convs[0](c2) + _upsample(p3, c2.shape[2:])
-        p2 = self.coord_attention[0](p2)        
+        p2 = self.lateral_convs[0](c2) + _upsample(p3, c2.shape[2:])    
         # Generate P6 level
         p6 = self.extra_convs[0](p5)
-        p6 = self.coord_attention[1](p6)
-        
         # All 5 FPN levels in correct order
         fpn_features = [p2, p3, p4, p5, p6]
         
