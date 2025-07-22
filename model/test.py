@@ -82,7 +82,7 @@ def main():
     model = FPN(num_classes=27)
     
     try:
-        ckpt = torch.load("runs/fcos_Cord/fcos_epoch50.pth", map_location=device, weights_only=False)
+        ckpt = torch.load("runs/basic_fcos/fcos_epoch50.pth", map_location=device, weights_only=False)
         model.load_state_dict(ckpt["model_state"])
         model.to(device)
         model.eval()

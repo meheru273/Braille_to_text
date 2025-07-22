@@ -270,7 +270,7 @@ def train(train_dir: pathlib.Path, val_dir: pathlib.Path, writer, resume_ckpt_pa
                 print(f"  Avg Validation Loss: {avg_val_loss:.4f}")
         
         # =================== CHECKPOINT SAVING ===================
-        if epoch % 5 == 0 or epoch == NUM_EPOCHS:
+        if epoch % 20 == 0 or epoch == NUM_EPOCHS:
             checkpoint_dir = os.path.join(writer.log_dir, "checkpoints")
             os.makedirs(checkpoint_dir, exist_ok=True)
             

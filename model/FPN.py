@@ -117,7 +117,7 @@ class FPN(nn.Module):
         
         # FIXED: Consistent configuration for 5 levels
         self.strides = [2,4, 8, 16, 32]
-        self.scales = nn.Parameter(torch.tensor([8.0,6.0, 4.0, 2.5, 2.0]))
+        self.scales = nn.Parameter(torch.tensor([12.0,8.0, 6.0, 3, 2.5]))
 
 
         # self.coord_attention = nn.ModuleList([   

@@ -146,9 +146,7 @@ def debug_detections_from_network_output(
     batch_size = classes[0].shape[0]
     
     for i, (feat_classes, feat_boxes, scale, stride) in enumerate(zip(
-        classes, boxes, scales, strides
-    )):
-        print(f"\nLevel {i} (stride={stride}, scale={scale}):")
+        classes, boxes, scales, strides)):
         
         # Check class predictions
         class_scores, class_indices = torch.max(feat_classes, dim=-1)

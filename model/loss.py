@@ -51,15 +51,6 @@ def _compute_loss(
         box_p_flat = box_p.view(-1, 4).float()           # [B*H*W, 4]
         box_t_flat = box_t.view(-1, 4).float()           # [B*H*W, 4]
 
-        # ✅ Debug: Check tensor shapes
-        print(f"Level {idx} - cls_p_flat: {cls_p_flat.shape}, cls_t_flat: {cls_t_flat.shape}")
-        
-        # ✅ Ensure batch sizes match
-        if cls_p_flat.shape[0] != cls_t_flat.shape[0]:
-            print(f"ERROR: Batch size mismatch at level {idx}")
-            print(f"Predictions: {cls_p_flat.shape}, Targets: {cls_t_flat.shape}")
-            continue
-
         pos_mask = cls_t_flat > 0
 
         # Classification loss
