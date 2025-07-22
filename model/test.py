@@ -4,11 +4,12 @@ import torch
 from FPN import FPN
 from inference import compute_detections, render_detections_to_image, tensor_to_image
 from PostProcessing import (generate_colors, non_max_suppression, 
-                           refine_large_boxes, smart_resize, 
+                           refine_large_boxes, letterbox_image,
                            map_detections_to_original)
 
 from torchviz import make_dot
 import torch
+
 
 def apply_postprocessing_pipeline(detections, confidence_threshold=0.3, nms_threshold=0.3):
     """Apply complete postprocessing pipeline to raw detections"""
@@ -39,14 +40,17 @@ def apply_postprocessing_pipeline(detections, confidence_threshold=0.3, nms_thre
     nms_detections = [filtered_detections[i] for i in keep_indices]
     print(f"[INFO] After NMS: {len(nms_detections)} detections")
     
-    # Step 4: Refine large boxes
-    refined_detections = refine_large_boxes(nms_detections, shrink_factor=0.6)
-    print(f"[INFO] After box refinement: {len(refined_detections)} detections")
+
     
-    return refined_detections
+    return nms_detections
+
 
 def analyze_detection_distribution(detections, img_shape):
-    """Check if detections are properly distributed"""
+    """Check if detections are properly distributed across image quadrants"""
+    if len(detections) == 0:
+        print("No detections to analyze")
+        return
+        
     orig_h, orig_w = img_shape[:2]
     quadrants = {'top_left': 0, 'top_right': 0, 'bottom_left': 0, 'bottom_right': 0}
     
@@ -54,13 +58,21 @@ def analyze_detection_distribution(detections, img_shape):
         x_center = (det.bbox[0] + det.bbox[2]) / 2
         y_center = (det.bbox[1] + det.bbox[3]) / 2
         
+        # Complete the quadrant classification
         if x_center < orig_w / 2 and y_center < orig_h / 2:
             quadrants['top_left'] += 1
-        # ... (continue for other quadrants)
+        elif x_center >= orig_w / 2 and y_center < orig_h / 2:
+            quadrants['top_right'] += 1
+        elif x_center < orig_w / 2 and y_center >= orig_h / 2:
+            quadrants['bottom_left'] += 1
+        else:
+            quadrants['bottom_right'] += 1
     
+    print("Detection distribution:")
     for quadrant, count in quadrants.items():
         percentage = count / len(detections) * 100 if detections else 0
-        print(f"{quadrant}: {count} ({percentage:.1f}%)")
+        print(f"  {quadrant}: {count} ({percentage:.1f}%)")
+
 
 def main():
     print("=== BRAILLE DETECTION WITH POSTPROCESSING ===")
@@ -70,7 +82,7 @@ def main():
     model = FPN(num_classes=27)
     
     try:
-        ckpt = torch.load("runs/fcos_cbam/fcos_epoch30.pth", map_location=device, weights_only=False)
+        ckpt = torch.load("runs/fcos_Cord/fcos_epoch30.pth", map_location=device, weights_only=False)
         model.load_state_dict(ckpt["model_state"])
         model.to(device)
         model.eval()
@@ -80,7 +92,7 @@ def main():
         return
     
     # 2. Load and preprocess image
-    img_path = "testImage/before3.jpeg"
+    img_path = "testImage/before2.jpg"
     
     try:
         img_bgr = cv2.imread(img_path)
@@ -92,17 +104,35 @@ def main():
         orig_shape = img_rgb.shape
         print(f"[OK] Loaded image: {orig_shape}")
         
-        img_resized, scale = smart_resize(img_rgb, max_size=(700, 1024))
-        print(f"[OK] Resized image: {img_resized.shape}")
+        # FIXED: Properly handle letterbox_image return value
+        letterbox_result = letterbox_image(img_rgb, (700, 1024))
         
-        # Define H, W in the same scope as detection processing
-        H, W = img_resized.shape[:2]
-        print(f"[DEBUG] H={H}, W={W}")
+        # Handle different return formats from letterbox_image
+        if isinstance(letterbox_result, tuple):
+            # If letterbox_image returns (image, scale_info)
+            img_resized = letterbox_result[0]
+            scale_info = letterbox_result[1] if len(letterbox_result) > 1 else None
+            print(f"[INFO] Letterbox returned tuple, using first element as image")
+        else:
+            # If letterbox_image returns just the image
+            img_resized = letterbox_result
+            scale_info = None
         
-        # 3. Run detection - MOVED INSIDE THE SAME TRY BLOCK
+        # Ensure img_resized is a numpy array
+        if not isinstance(img_resized, np.ndarray):
+            print(f"[ERROR] Expected numpy array, got {type(img_resized)}")
+            return
+            
+        print(f"[OK] Image resized to: {img_resized.shape}")
+         
+        # 3. Run detection
         print("\n=== RUNNING DETECTION ===")
         raw_detections = compute_detections(model, img_resized, device)
         print(f"[OK] Raw detections: {len(raw_detections)}")
+        
+        if len(raw_detections) == 0:
+            print("[WARNING] No detections found. Check your model and image.")
+            return
         
         # 4. Apply postprocessing pipeline
         print("\n=== APPLYING POSTPROCESSING ===")
@@ -111,6 +141,10 @@ def main():
             confidence_threshold=0.3, 
             nms_threshold=0.3
         )
+        
+        if len(processed_detections) == 0:
+            print("[WARNING] No detections remain after postprocessing.")
+            return
         
         # Show sample results
         print("\n=== DETECTION RESULTS ===")
@@ -122,10 +156,24 @@ def main():
         
         # 5. Map to original coordinates
         print("\n=== MAPPING TO ORIGINAL COORDINATES ===")
-        original_detections = map_detections_to_original(
-             processed_detections, scale, orig_shape
-        )
-        print(f"[OK] Mapped {len(original_detections)} detections")
+        try:
+            # FIXED: Handle potential issues with coordinate mapping
+            if scale_info is not None:
+                # If we have scale info from letterbox, use it for better mapping
+                original_detections = map_detections_to_original(
+                    processed_detections, orig_shape, scale_info
+                )
+            else:
+                # Fallback to basic mapping
+                original_detections = map_detections_to_original(
+                    processed_detections, orig_shape
+                )
+            print(f"[OK] Mapped {len(original_detections)} detections")
+        except Exception as mapping_error:
+            print(f"[ERROR] Coordinate mapping failed: {mapping_error}")
+            # Use processed detections as fallback
+            original_detections = processed_detections
+            print("[WARNING] Using detections in resized image coordinates")
         
         # 6. Visualize results with colors
         print("\n=== CREATING VISUALIZATIONS ===")
@@ -134,8 +182,11 @@ def main():
         colors = generate_colors(27)
         
         # Create enhanced visualization
+        img_for_viz = img_rgb.copy() if len(original_detections) > 0 else img_resized.copy()
+        detections_for_viz = original_detections if len(original_detections) > 0 else processed_detections
+        
         img_with_detections = create_enhanced_visualization(
-            img_rgb.copy(), original_detections, colors
+            img_for_viz, detections_for_viz, colors
         )
         
         # Save results
@@ -145,14 +196,18 @@ def main():
         
         # Generate model architecture diagram
         try:
-            dot = make_dot(model, params=dict(model.named_parameters()))
+            # Create a dummy input for visualization
+            dummy_input = torch.randn(1, 3, 224, 224).to(device)
+            dot = make_dot(model(dummy_input), params=dict(model.named_parameters()))
             dot.render("fpn_architecture", format="png")
             print("[OK] Saved model architecture diagram")
         except Exception as viz_error:
             print(f"[WARNING] Could not save architecture diagram: {viz_error}")
         
         # Final summary
+        print("\n=== DETECTION DISTRIBUTION ===")
         analyze_detection_distribution(original_detections, orig_shape)
+        
         print(f"\n=== SUMMARY ===")
         print(f"Raw detections: {len(raw_detections)}")
         print(f"Final detections: {len(original_detections)}")
@@ -164,33 +219,58 @@ def main():
         traceback.print_exc()
         return
 
+
 def create_enhanced_visualization(img, detections, colors):
     """Create enhanced visualization with class-specific colors"""
     
-    for det in detections:
-        x1, y1, x2, y2 = det.bbox.astype(int)
-        class_id = det.object_class
-        score = det.score
-        
-        # Get color for this class
-        color = colors[class_id % len(colors)]
-        
-        # Draw bounding box
-        cv2.rectangle(img, (x1, y1), (x2, y2), color, 2)
-        
-        # Draw class label and score
-        label = f"Class {class_id}: {score:.2f}"
-        label_size = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, 0.5, 1)[0]
-        
-        # Background rectangle for text
-        cv2.rectangle(img, (x1, y1 - label_size[1] - 5), 
-                     (x1 + label_size[0], y1), color, -1)
-        
-        # Text
-        cv2.putText(img, label, (x1, y1 - 5), 
-                   cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
+    # Make a copy to avoid modifying the original
+    img_vis = img.copy()
     
-    return img
+    for det in detections:
+        try:
+            x1, y1, x2, y2 = det.bbox.astype(int)
+            class_id = det.object_class
+            score = det.score
+            
+            # Ensure coordinates are within image bounds
+            h, w = img_vis.shape[:2]
+            x1, x2 = max(0, x1), min(w, x2)
+            y1, y2 = max(0, y1), min(h, y2)
+            
+            # Skip invalid boxes
+            if x2 <= x1 or y2 <= y1:
+                continue
+            
+            # Get color for this class
+            color = colors[class_id % len(colors)]
+            
+            # Convert color to tuple of ints for OpenCV
+            color = tuple(int(c) for c in color)
+            
+            # Draw bounding box
+            cv2.rectangle(img_vis, (x1, y1), (x2, y2), color, 2)
+            
+            # Draw class label and score
+            label = f"Class {class_id}: {score:.2f}"
+            label_size = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, 0.5, 1)[0]
+            
+            # Ensure label fits within image
+            label_y = max(y1, label_size[1] + 5)
+            
+            # Background rectangle for text
+            cv2.rectangle(img_vis, (x1, label_y - label_size[1] - 5), 
+                         (x1 + label_size[0], label_y), color, -1)
+            
+            # Text
+            cv2.putText(img_vis, label, (x1, label_y - 5), 
+                       cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
+                       
+        except Exception as viz_error:
+            print(f"[WARNING] Failed to visualize detection: {viz_error}")
+            continue
+    
+    return img_vis
+
 
 if __name__ == "__main__":
     main()

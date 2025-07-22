@@ -45,7 +45,7 @@ def generate_colors(num_classes):
         colors.append((int(color[0]), int(color[1]), int(color[2])))
     return colors
 
-def refine_large_boxes(detections, shrink_factor=0.5):
+def refine_large_boxes(detections, shrink_factor=1):
     """Shrink oversized bounding boxes while maintaining center"""
     refined_boxes = []
     
@@ -85,7 +85,7 @@ def refine_large_boxes(detections, shrink_factor=0.5):
     return refined_boxes
 
 
-def letterbox_image(img_rgb, target_size=(800, 1200)):
+def letterbox_image(img_rgb, target_size=(700, 1024)):
     """Apply letterboxing to match training preprocessing"""
     orig_h, orig_w = img_rgb.shape[:2]
     target_w, target_h = target_size
