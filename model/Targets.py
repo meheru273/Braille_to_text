@@ -7,7 +7,6 @@ def generate_targets(img_shape, class_labels_by_batch, box_labels_by_batch, stri
     """Memory-efficient target generation based on working FCOS implementation"""
     
     batch_size, _, img_h, img_w = img_shape
-    print(f" Input image shape: {img_shape}")
     
     # ✅ CRITICAL: Determine device early
     device = 'cuda' if torch.cuda.is_available() else 'cpu'
@@ -25,7 +24,6 @@ def generate_targets(img_shape, class_labels_by_batch, box_labels_by_batch, stri
         cls_target = torch.zeros((batch_size, feat_h, feat_w), dtype=torch.long, device=device)
         box_target = torch.zeros((batch_size, feat_h, feat_w, 4), dtype=torch.float32, device=device)
         
-        print(f" Level {level_idx} (stride={stride}): feature map size ({feat_h}, {feat_w})")
         
         positive_locations = 0
         min_size, max_size = size_ranges[level_idx]
@@ -72,11 +70,8 @@ def generate_targets(img_shape, class_labels_by_batch, box_labels_by_batch, stri
                             box_target[batch_idx, y, x] = torch.tensor([left, top, right, bottom], device=device)
                             positive_locations += 1
             
-            
-        print(f" Level {level_idx}: {positive_locations} positive locations assigned")
         
         class_targets.append(cls_target)
         box_targets.append(box_target)
     
-    print(f" Generated targets for {len(class_targets)} levels")
     return class_targets, box_targets

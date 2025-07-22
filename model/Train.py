@@ -7,7 +7,7 @@ import torch
 import torch.nn.functional as F
 from torch.utils.data import Dataset, DataLoader
 import gc
-from torch.cuda.amp import autocast, GradScaler
+from torch.amp import autocast, GradScaler 
 
 # Import existing functions from your modules
 from inference import detections_from_network_output
@@ -168,7 +168,7 @@ def train(train_dir: pathlib.Path, val_dir: pathlib.Path, writer, resume_ckpt_pa
             optimizer.zero_grad(set_to_none=True)  # More memory efficient than zero_grad()
             
             # =================== FORWARD PASS WITH AUTOCAST ===================
-            with torch.amp.autocast(device_type='cuda', dtype=torch.float16):
+            with torch.amp.autocast(device_type='cuda'):
                 batch_norm = normalize_batch(x)
                 cls_pred, box_pred = model(batch_norm)
                 
@@ -237,7 +237,7 @@ def train(train_dir: pathlib.Path, val_dir: pathlib.Path, writer, resume_ckpt_pa
                     x = x.to(device, non_blocking=True)
                     
                     # Use autocast for validation too (memory efficient)
-                    with autocast(device_type='cuda', dtype=torch.float16):
+                    with autocast(device_type='cuda'):
                         batch_norm = normalize_batch(x)
                         cls_pred, box_pred = model(batch_norm)
                         
