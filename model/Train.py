@@ -21,8 +21,6 @@ logger = logging.getLogger(__name__)
 import os
 os.environ['PYTORCH_CUDA_ALLOC_CONF'] = 'max_split_size_mb:128,expandable_segments:True'
 
-torch.cuda.set_per_process_memory_fraction(0.75)  # Reduced from 0.80 for safety
-torch.backends.cudnn.benchmark = True  # Optimize cudnn for consistent input sizes
 
 def tensor_to_image(tensor):
     """Convert tensor to numpy array for visualization"""

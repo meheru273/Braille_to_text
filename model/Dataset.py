@@ -61,12 +61,14 @@ class COCOData(Dataset):
         # Load annotations (coordinates already match the processed image)
         ann_ids = self.coco.getAnnIds(imgIds=img_id)
         anns = self.coco.loadAnns(ann_ids)
-        
+        ann_num =0 
         boxes, labels = [], []
         for ann in anns:
             x, y, w, h = ann['bbox']
             boxes.append([x, y, x + w, y + h])
             labels.append(self.cat_id_to_contiguous[ann['category_id']])
+            ann_num+=1
+        print("number of annotations in this image :",ann_num)
         
         # Convert to tensors
         if boxes:
