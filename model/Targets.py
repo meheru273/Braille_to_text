@@ -105,10 +105,6 @@ def generate_targets(img_shape, class_labels_by_batch, box_labels_by_batch, stri
                 max_side = max(x2 - x1, y2 - y1)
                 print(f"      Max side: {max_side:.1f}, range check: {min_size} <= {max_side:.1f} < {max_size}")
                 
-                if max_side < min_size or max_side >= max_size:
-                    print(f"      ❌ Box filtered out - size {max_side:.1f} not in range [{min_size}, {max_size})")
-                    filtered_boxes += 1
-                    continue
                 
                 # ✅ FIXED: Efficient coordinate mapping
                 min_x = max(int(x1 / stride), 0)
