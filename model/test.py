@@ -5,13 +5,13 @@ from FPN import FPN
 from inference import compute_detections, render_detections_to_image, tensor_to_image
 from PostProcessing import (generate_colors, non_max_suppression, 
                            refine_large_boxes, letterbox_image,
-                           map_detections_to_original)
+                           map_detections)
 
 from torchviz import make_dot
 import torch
 
 
-def apply_postprocessing_pipeline(detections, confidence_threshold=0.3, nms_threshold=0.3):
+def apply_postprocessing_pipeline(detections, confidence_threshold=0.01, nms_threshold=0.5):
     """Apply complete postprocessing pipeline to raw detections"""
     
     if len(detections) == 0:
@@ -40,9 +40,10 @@ def apply_postprocessing_pipeline(detections, confidence_threshold=0.3, nms_thre
     nms_detections = [filtered_detections[i] for i in keep_indices]
     print(f"[INFO] After NMS: {len(nms_detections)} detections")
     
-
+    shrink_detections = refine_large_boxes(nms_detections)
     
-    return nms_detections
+    
+    return shrink_detections
 
 
 def analyze_detection_distribution(detections, img_shape):
@@ -92,7 +93,7 @@ def main():
         return
     
     # 2. Load and preprocess image
-    img_path = "testImage/before.jpg"
+    img_path = "testImage/before2.jpg"
     
     try:
         img_bgr = cv2.imread(img_path)
@@ -103,25 +104,18 @@ def main():
         img_rgb = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2RGB)
         orig_shape = img_rgb.shape
         print(f"[OK] Loaded image: {orig_shape}")
+        lab = cv2.cvtColor(img_rgb, cv2.COLOR_RGB2LAB)
+        l, a, b = cv2.split(lab)
+        clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8,8))
+        l_clahe = clahe.apply(l)
+        lab = cv2.merge((l_clahe, a, b))
+        img_rgb = cv2.cvtColor(lab, cv2.COLOR_LAB2RGB)
         
         # FIXED: Properly handle letterbox_image return value
         letterbox_result = letterbox_image(img_rgb, (700, 1024))
-        
-        # Handle different return formats from letterbox_image
-        if isinstance(letterbox_result, tuple):
-            # If letterbox_image returns (image, scale_info)
-            img_resized = letterbox_result[0]
-            scale_info = letterbox_result[1] if len(letterbox_result) > 1 else None
-            print(f"[INFO] Letterbox returned tuple, using first element as image")
-        else:
-            # If letterbox_image returns just the image
-            img_resized = letterbox_result
-            scale_info = None
-        
-        # Ensure img_resized is a numpy array
-        if not isinstance(img_resized, np.ndarray):
-            print(f"[ERROR] Expected numpy array, got {type(img_resized)}")
-            return
+        img_resized = letterbox_result[0]
+        scale_info = letterbox_result[1] if len(letterbox_result) > 1 else None
+    
             
         print(f"[OK] Image resized to: {img_resized.shape}")
          
@@ -138,13 +132,9 @@ def main():
         print("\n=== APPLYING POSTPROCESSING ===")
         processed_detections = apply_postprocessing_pipeline(
             raw_detections, 
-            confidence_threshold=0.3, 
-            nms_threshold=0.3
+            confidence_threshold=0.01, 
+            nms_threshold=0.1
         )
-        
-        if len(processed_detections) == 0:
-            print("[WARNING] No detections remain after postprocessing.")
-            return
         
         # Show sample results
         print("\n=== DETECTION RESULTS ===")
@@ -156,24 +146,7 @@ def main():
         
         # 5. Map to original coordinates
         print("\n=== MAPPING TO ORIGINAL COORDINATES ===")
-        try:
-            # FIXED: Handle potential issues with coordinate mapping
-            if scale_info is not None:
-                # If we have scale info from letterbox, use it for better mapping
-                original_detections = map_detections_to_original(
-                    processed_detections, orig_shape, scale_info
-                )
-            else:
-                # Fallback to basic mapping
-                original_detections = map_detections_to_original(
-                    processed_detections, orig_shape
-                )
-            print(f"[OK] Mapped {len(original_detections)} detections")
-        except Exception as mapping_error:
-            print(f"[ERROR] Coordinate mapping failed: {mapping_error}")
-            # Use processed detections as fallback
-            original_detections = processed_detections
-            print("[WARNING] Using detections in resized image coordinates")
+        original_detections = map_detections(processed_detections)
         
         # 6. Visualize results with colors
         print("\n=== CREATING VISUALIZATIONS ===")
@@ -182,11 +155,10 @@ def main():
         colors = generate_colors(27)
         
         # Create enhanced visualization
-        img_for_viz = img_rgb.copy() if len(original_detections) > 0 else img_resized.copy()
-        detections_for_viz = original_detections if len(original_detections) > 0 else processed_detections
+        img_for_viz = img_resized.copy() 
         
         img_with_detections = create_enhanced_visualization(
-            img_for_viz, detections_for_viz, colors
+            img_for_viz, original_detections, colors
         )
         
         # Save results

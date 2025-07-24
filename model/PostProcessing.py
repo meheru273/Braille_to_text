@@ -45,7 +45,7 @@ def generate_colors(num_classes):
         colors.append((int(color[0]), int(color[1]), int(color[2])))
     return colors
 
-def refine_large_boxes(detections, shrink_factor=1):
+def refine_large_boxes(detections, shrink_factor=.6):
     """Shrink oversized bounding boxes while maintaining center"""
     refined_boxes = []
     
@@ -85,58 +85,53 @@ def refine_large_boxes(detections, shrink_factor=1):
     return refined_boxes
 
 
-def letterbox_image(img_rgb, target_size=(700, 1024)):
-    """Apply letterboxing to match training preprocessing"""
+import numpy as np
+import cv2
+
+def letterbox_image(img_rgb, target_size=(720, 1024)):
+    
     orig_h, orig_w = img_rgb.shape[:2]
     target_w, target_h = target_size
-    
-    # Calculate scale to maintain aspect ratio
+
+    # Compute uniform scale for aspect ratio
     scale = min(target_w / orig_w, target_h / orig_h)
     new_w, new_h = int(orig_w * scale), int(orig_h * scale)
-    
-    # Resize image
-    img_resized = cv2.resize(img_rgb, (new_w, new_h))
-    
-    # Create letterboxed image with gray padding
-    letterboxed = np.full((target_h, target_w, 3), 114, dtype=np.uint8)
-    
-    # Calculate paste position (center)
+
+    # Resize image with OpenCV
+    img_resized = cv2.resize(img_rgb, (new_w, new_h), interpolation=cv2.INTER_LINEAR)
+
+    # Create black background canvas
+    letterboxed = np.zeros((target_h, target_w, 3), dtype=np.uint8)
+
+    # Center the resized image
     paste_x = (target_w - new_w) // 2
     paste_y = (target_h - new_h) // 2
-    
-    # Paste resized image onto letterboxed background
     letterboxed[paste_y:paste_y+new_h, paste_x:paste_x+new_w] = img_resized
-    
+
     return letterboxed, scale, paste_x, paste_y
 
 
-def map_detections_to_original(detections, scale, paste_x, paste_y, orig_shape):
-    """Map detections from letterboxed coordinates back to original image"""
-    orig_h, orig_w = orig_shape[:2]
+def map_detections(detections, letterbox_shape=(720, 1024)):
+    """Keep detections in letterboxed coordinates and clip to letterbox bounds"""
+    letterbox_h, letterbox_w = letterbox_shape
     
     mapped_detections = []
     for det in detections:
         x1, y1, x2, y2 = det.bbox
         
-        # Remove letterbox padding
-        x1_orig = (x1 - paste_x) / scale
-        y1_orig = (y1 - paste_y) / scale
-        x2_orig = (x2 - paste_x) / scale
-        y2_orig = (y2 - paste_y) / scale
+        # Clip to letterboxed image bounds (720x1024)
+        x1_letterbox = max(0, min(letterbox_w, x1))
+        y1_letterbox = max(0, min(letterbox_h, y1))
+        x2_letterbox = max(0, min(letterbox_w, x2))
+        y2_letterbox = max(0, min(letterbox_h, y2))
         
-        # Clip to original image bounds
-        x1_orig = max(0, min(orig_w, x1_orig))
-        y1_orig = max(0, min(orig_h, y1_orig))
-        x2_orig = max(0, min(orig_w, x2_orig))
-        y2_orig = max(0, min(orig_h, y2_orig))
-        
-        # Create new detection with mapped coordinates
-        if x2_orig > x1_orig and y2_orig > y1_orig:
+        # Ensure valid bounding box
+        if x2_letterbox > x1_letterbox and y2_letterbox > y1_letterbox:
             from inference import Detection
             mapped_det = Detection(
                 score=det.score,
                 object_class=det.object_class,
-                bbox=np.array([x1_orig, y1_orig, x2_orig, y2_orig])
+                bbox=np.array([x1_letterbox, y1_letterbox, x2_letterbox, y2_letterbox])
             )
             mapped_detections.append(mapped_det)
     

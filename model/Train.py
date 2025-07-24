@@ -160,8 +160,7 @@ def train(train_dir: pathlib.Path, val_dir: pathlib.Path, writer, resume_ckpt_pa
             
             # Move data to device with non_blocking for efficiency
             x = x.to(device, non_blocking=True)
-            print(f"Batch {batch_idx} of epoch {epoch}")
-            
+
             # Zero gradients
             optimizer.zero_grad(set_to_none=True)  # More memory efficient than zero_grad()
             
@@ -256,9 +255,6 @@ def train(train_dir: pathlib.Path, val_dir: pathlib.Path, writer, resume_ckpt_pa
                     detections = detections_from_network_output(
                         H, W, cls_pred, box_pred, model.scales, model.strides
                     )
-                    
-                    print(f"Validation image {i}: {len(detections[0])} detections, "
-                          f"{len(box_labels[0])} ground truth boxes")
                     
                     # Clear validation tensors
                     del cls_pred, box_pred, batch_norm, val_loss

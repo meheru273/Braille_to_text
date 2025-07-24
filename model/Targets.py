@@ -19,8 +19,6 @@ def generate_targets(img_shape, class_labels_by_batch, box_labels_by_batch, stri
         feat_w = img_w // stride
         feature_sizes.append((feat_h, feat_w))
     
-    print(f"Image size: ({img_h}, {img_w})")
-    print(f"Feature sizes: {feature_sizes}")
     
     for level_idx, (stride, size_range, (feat_h, feat_w)) in enumerate(zip(strides, size_ranges, feature_sizes)):
         min_size, max_size = size_range
@@ -28,8 +26,6 @@ def generate_targets(img_shape, class_labels_by_batch, box_labels_by_batch, stri
         # Initialize targets with correct dimensions
         cls_target = torch.zeros((batch_size, feat_h, feat_w), dtype=torch.long)
         box_target = torch.zeros((batch_size, feat_h, feat_w, 4), dtype=torch.float32)
-        
-        print(f"Level {level_idx}: stride={stride}, size_range=({min_size}, {max_size}), feat_size=({feat_h}, {feat_w})")
         
         for batch_idx, (labels, boxes) in enumerate(zip(class_labels_by_batch, box_labels_by_batch)):
             if len(boxes) == 0:
@@ -89,14 +85,7 @@ def generate_targets(img_shape, class_labels_by_batch, box_labels_by_batch, stri
                                     right / stride,  # r*
                                     bottom / stride  # b*
                                 ], dtype=torch.float32)
-            
-            if objects_assigned > 0:
-                print(f"  Batch {batch_idx}: {objects_assigned} objects assigned to level {level_idx}")
-        
-        # Count positive targets for debugging
-        positive_targets = (cls_target > 0).sum().item()
-        print(f"Level {level_idx}: {positive_targets} positive targets generated")
-        
+             
         class_targets.append(cls_target)
         box_targets.append(box_target)
     

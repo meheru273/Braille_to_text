@@ -221,15 +221,13 @@ def _gather_detections(classes, boxes, max_detections=DEFAULT_MAX_DETECTIONS):
 def tensor_to_image(tensor: torch.Tensor) -> np.ndarray:
     
     arr = tensor.detach().cpu().numpy()
-    
-    # Handle different input ranges
+
     if arr.max() <= 1.0:
-        # Input is in [0, 1] range, scale to [0, 255]
         arr = arr * 255.0
     
-    if len(arr.shape) == 3:  # [C, H, W]
+    if len(arr.shape) == 3:  
         img = arr.transpose(1, 2, 0)  # [H, W, C]
-    elif len(arr.shape) == 2:  # [H, W] - grayscale
+    elif len(arr.shape) == 2:  
         img = arr
     else:
         raise ValueError(f"Unexpected tensor shape: {arr.shape}")

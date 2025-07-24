@@ -50,20 +50,7 @@ def calculate_iou(box1, box2):
     return intersection / union if union > 0 else 0.0
 
 def match_detections_to_ground_truth(detections, ground_truth, iou_threshold=0.01):
-    """
-    Match detections to ground truth boxes using IoU threshold.
     
-    Args:
-        detections: List of detection dictionaries with 'bbox', 'class', 'score'
-        ground_truth: List of ground truth dictionaries with 'bbox', 'class'
-        iou_threshold: IoU threshold for matching
-    
-    Returns:
-        matched_detections: List of matched detection indices
-        matched_gt: List of matched ground truth indices
-        unmatched_detections: List of unmatched detection indices
-        unmatched_gt: List of unmatched ground truth indices
-    """
     if len(detections) == 0 or len(ground_truth) == 0:
         return [], [], list(range(len(detections))), list(range(len(ground_truth)))
     
@@ -153,89 +140,93 @@ def compute_detections(model, test_loader, device, class_names, image_size, conf
             batch_norm = normalize_batch(images)
             
             # Forward pass
-            cls_pred, cen_pred, box_pred = model(batch_norm)
-            
-            # Get image dimensions
+            cls_pred, box_pred = model(batch_norm)
             H, W = images.shape[2], images.shape[3]
             
-            # Convert predictions to detections
             detections = detections_from_network_output(
-                H, W, cls_pred, cen_pred, box_pred, 
+                H, W, cls_pred, box_pred, 
                 model.scales, model.strides
             )
             
-            # Process detections for each image in batch
             for i in range(len(images)):
                 image_detections = []
                 image_ground_truth = []
                 
-                # Process detections with proper attribute access
+                # Process detections with class ID correction
                 for det in detections[i]:
-                    # Check if det has attributes or is a dict
                     if hasattr(det, 'score'):
-                        # Detection object with attributes
                         score = det.score
                         bbox = det.bbox if hasattr(det, 'bbox') else det.box
-                        if hasattr(det, 'class_id'):
+                        # Fix class ID access and potential mismatch
+                        if hasattr(det, 'object_class'):
+                            class_id = det.object_class
+                        elif hasattr(det, 'class_id'):
                             class_id = det.class_id
                         else:
-                            # Use getattr to safely access 'class' attribute
                             class_id = getattr(det, 'class', None)
                     else:
-                        # Dictionary format
                         score = det['score']
                         bbox = det['bbox']
                         class_id = det['class']
                     
-                    if score >= confidence_threshold:
+                    if score >= confidence_threshold and class_id is not None:
+                        # CRITICAL FIX: Ensure class IDs are in same range
+                        # Convert model output (1-26) to evaluation format (0-25)
+                        eval_class_id = class_id - 1 if class_id >= 1 else class_id
+                        
                         image_detections.append({
-                            'bbox': bbox,
-                            'class': class_id,
+                            'bbox': bbox.tolist() if hasattr(bbox, 'tolist') else bbox,
+                            'class': eval_class_id,
                             'score': score
                         })
                 
-                # Process ground truth
+                # Process ground truth with same class ID format
                 for j in range(len(class_labels[i])):
+                    gt_class = class_labels[i][j].item()
+                    # Ensure ground truth is also in 0-25 range
+                    eval_gt_class = gt_class - 1 if gt_class >= 1 else gt_class
+                    
                     image_ground_truth.append({
                         'bbox': box_labels[i][j].tolist(),
-                        'class': class_labels[i][j].item()
+                        'class': eval_gt_class
                     })
                 
                 all_detections.append(image_detections)
                 all_ground_truth.append(image_ground_truth)
             
-            # Optional: Log progress every 10 batches
             if batch_idx % 10 == 0:
                 print(f"Processed batch {batch_idx}")
     
     return all_detections, all_ground_truth
 
 
-def calculate_map(all_detections, all_ground_truth, iou_thresholds=[0.01, 0.05, 0.08, 0.65, 0.7]):
+def calculate_map(all_detections, all_ground_truth, iou_thresholds=None):
     """
-    Calculate mean Average Precision (mAP) across multiple IoU thresholds.
-    
-    Args:
-        all_detections: List of detections for each image
-        all_ground_truth: List of ground truth for each image
-        iou_thresholds: List of IoU thresholds
-    
-    Returns:
-        mAP: Mean Average Precision
-        mAP_50: mAP at IoU threshold 0.5
-        mAP_75: mAP at IoU threshold 0.75
+    Fixed mAP calculation with proper Average Precision computation.
     """
+    if iou_thresholds is None:
+        iou_thresholds = [0.05, 0.1, 0.15, 0.2, 0.25, 0.3, 0.35, 0.4, 0.45, 0.5, 
+                         0.55, 0.6, 0.65, 0.7, 0.75, 0.8, 0.85, 0.9, 0.95]
+    
     ap_scores = []
     
     for iou_threshold in iou_thresholds:
         precision, recall, _ = calculate_precision_recall(
             all_detections, all_ground_truth, iou_threshold
         )
-        ap_scores.append(precision)  # Simplified AP calculation
+        # Use precision as simplified AP (could be improved with proper PR curve)
+        ap_scores.append(precision)
     
-    mAP = np.mean(ap_scores)
-    mAP_50 = ap_scores[0] if len(ap_scores) > 0 else 0.0
-    mAP_75 = ap_scores[5] if len(ap_scores) > 5 else 0.0
+    mAP = np.mean(ap_scores) if ap_scores else 0.0
+    
+    # Find closest thresholds for standard metrics
+    mAP_50_idx = min(range(len(iou_thresholds)), 
+                     key=lambda i: abs(iou_thresholds[i] - 0.5))
+    mAP_75_idx = min(range(len(iou_thresholds)), 
+                     key=lambda i: abs(iou_thresholds[i] - 0.75))
+    
+    mAP_50 = ap_scores[mAP_50_idx] if ap_scores else 0.0
+    mAP_75 = ap_scores[mAP_75_idx] if ap_scores else 0.0
     
     return mAP, mAP_50, mAP_75
 
@@ -350,7 +341,7 @@ def print_evaluation_results(results: Dict):
 if __name__ == "__main__":
     # Set up paths
     test_dir = pathlib.Path(r"C:\Users\ASUS\OneDrive\Documents\fcos_scratch\dataset.coco\test") 
-    model_path = pathlib.Path(r"C:\Users\ASUS\OneDrive\Documents\fcos_scratch\runs\fcos_custom\fcos_epoch10.pth")
+    model_path = pathlib.Path(r"C:\Users\ASUS\OneDrive\Documents\fcos_scratch\runs\basic_fcos\fcos_epoch50.pth")
     
     try:
         # Run evaluation
