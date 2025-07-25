@@ -5,24 +5,27 @@ from torch.utils.data import Dataset
 import numpy as np
 from PIL import Image
 from pycocotools.coco import COCO
-import os 
-import re
+import os
+import torchvision.transforms.functional as F
 
+# Keep your original expected classes
 EXPECTED_CLASSES = ['a', 'b', 'c', 'd', 'e', 'f', 'g', 'h', 'i', 'j', 'k', 'l', 'm', 
                    'n', 'o', 'p', 'q', 'r', 's', 't', 'u', 'v', 'w', 'x', 'y', 'z']
 
 class COCOData(Dataset):
     """
-    Enhanced COCO dataset with proper preprocessing for Braille detection
+    Enhanced COCO dataset with preserved EXPECTED_CLASSES filtering
     """
     def __init__(self,
                  split_dir: pathlib.Path,
                  image_size=(700, 1024),
                  min_area=2,
                  max_detections=None):
+        
         self.split_dir = pathlib.Path(split_dir)
         if not self.split_dir.exists():
             raise FileNotFoundError(f"Folder not found: {self.split_dir}")
+        
         # Find annotation JSON
         jsons = list(self.split_dir.glob("*.json"))
         if not jsons:
@@ -31,213 +34,79 @@ class COCOData(Dataset):
         
         print(f"Loading COCO annotations from: {ann_file}")
         self.coco = COCO(str(ann_file))
-        self.images_dir = self.split_dir
         self.image_ids = list(self.coco.imgs.keys())
-        # Configurable parameters
-        self.image_size = image_size  # (width, height)
-        self.min_area = min_area
-        self.max_detections = max_detections
-
-        # Map original COCO category IDs to contiguous 1..N
-        cats = self.coco.loadCats(self.coco.getCatIds())
-        cats = [cat for cat in cats if cat['name'] in EXPECTED_CLASSES]
-        cats = sorted(cats, key=lambda x: x['id'])
-        self.cat_id_to_contiguous = {cat['id']: i+1 for i, cat in enumerate(cats)}
-        self.num_classes = len(cats) + 1  # +1 for background=0
-
-    def __len__(self):
-        return len(self.image_ids)
-
-    def __getitem__(self, idx):
-        # Load image
-        img_path = os.path.join(self.root_dir, self.img_files[idx])
-        img = Image.open(img_path).convert("RGB")
-        original_size = img.size  # (width, height)
         
-        # Load annotations BEFORE letterboxing
-        ann_path = img_path.replace('.jpg', '+recto.txt')
-        boxes = []
-        labels = []
-        
-        if os.path.exists(ann_path):
-            boxes, labels = self._parse_annotation(ann_path)
-            
-            # Transform coordinates for letterboxing
-            if self.image_size and boxes:
-                boxes = self._transform_coordinates_for_letterbox(
-                    boxes, original_size, self.image_size
-                )
-        
-        # Apply letterboxing to image
-        if self.image_size:
-            img = self._letterbox_image(img)
-        
-        # Convert image to tensor
-        img_np = np.array(img).astype(np.float32) / 255.0
-        img_tensor = torch.from_numpy(img_np.transpose(2, 0, 1)).float()
-        
-        # Convert to tensors (handle empty annotations)
-        if len(boxes) == 0:
-            boxes = torch.zeros((0, 4), dtype=torch.float32)
-            labels = torch.zeros((0,), dtype=torch.long)
-        else:
-            boxes = torch.tensor(boxes, dtype=torch.float32)
-            labels = torch.tensor(labels, dtype=torch.long)
-        
-        return img_tensor, labels, boxes
-
-        
-    def get_num_classes(self):
-        return self.num_classes
-
-    def get_class_names(self):
-        cats = self.coco.loadCats(self.coco.getCatIds())
-        cats = sorted(cats, key=lambda x: x['id'])
-        for c in cats:
-            print(f"Class {c['id']}: {c['name']}")
-        return ['__background__'] + [c['name'] for c in cats]
-    
-class DSBIData(torch.utils.data.Dataset):
-    def __init__(self, root_dir, split='train', file_list=None, transforms=None, min_area=2, image_size=(700, 1024)):
-        self.root_dir = root_dir
-        self.split = split
-        self.transforms = transforms
+        # Parameters
         self.image_size = image_size
         self.min_area = min_area
+        self.max_detections = max_detections
         
-        # Set number of classes (background + 26 Braille characters)
-        self.num_classes = 27
+        # PRESERVED FUNCTIONALITY: Map original COCO category IDs to contiguous 1..N
+        # Filter categories to only include EXPECTED_CLASSES (your original logic)
+        cats = self.coco.loadCats(self.coco.getCatIds())
+        cats = [cat for cat in cats if cat['name'] in EXPECTED_CLASSES]  # Keep your filtering
+        cats = sorted(cats, key=lambda x: x['id'])
         
-        if file_list is None:
-            self.img_files = self._discover_images_by_split()
-        else:
-            with open(file_list, 'r') as f:
-                self.img_files = [line.strip() for line in f.readlines()]
+        self.cat_id_to_contiguous = {cat['id']: i+1 for i, cat in enumerate(cats)}
+        self.contiguous_to_cat_id = {v: k for k, v in self.cat_id_to_contiguous.items()}
+        self.num_classes = len(cats) + 1  # +1 for background=0
         
-        print(f"Found {len(self.img_files)} images for {split} split")
-
-    def _discover_images_by_split(self):
-        """Discover images based on train/test split logic"""
-        img_files = []
-        data_dir = os.path.join(self.root_dir, "data")
-        
-        if not os.path.exists(data_dir):
-            print(f"Warning: data directory not found at {data_dir}")
-            return []
-        
-        for category_folder in os.listdir(data_dir):
-            category_path = os.path.join(data_dir, category_folder)
-            
-            if os.path.isdir(category_path):
-                jpg_files = [f for f in os.listdir(category_path) if f.endswith('.jpg')]
-                
-                for file in jpg_files:
-                    if self._should_include_file(category_folder, file):
-                        rel_path = os.path.join("data", category_folder, file)
-                        img_files.append(rel_path)
-        
-        img_files.sort()
-        return img_files
-    
-    def _should_include_file(self, category, filename):
-        """Determine if file should be included based on split"""
-        number_match = re.search(r'\+(\d+)\.jpg$', filename)
-        
-        if not number_match:
-            return False
-        
-        file_number = int(number_match.group(1))
-        
-        existing_categories = ['Massage', 'Math', 'Ordinary Printed Document', 'Shaver Yang Fengting']
-        test_only_categories = ['Fundamentals of Massage', 
-                               'The Second Volume of Ninth Grade Chinese Book 1',
-                               'The Second Volume of Ninth Grade Chinese Book 2']
-        
-        if self.split == 'train':
-            # Special handling for each category in train
-            if category == 'Massage' and 1 <= file_number <= 10:
-                return True
-            elif category == 'Math' and 1 <= file_number <= 10:
-                return True
-            elif category == 'Ordinary Printed Document' and 1 <= file_number <= 3:
-                return True
-            elif category == 'Shaver Yang Fengting' and 3 <= file_number <= 5:
-                return True
-                
-        elif self.split == 'test':
-            # Existing categories with higher numbers
-            if category == 'Massage' and file_number >= 11:
-                return True
-            elif category == 'Math' and file_number >= 11:
-                return True
-            elif category == 'Ordinary Printed Document' and 4 <= file_number <= 6:
-                return True
-            elif category == 'Shaver Yang Fengting' and 6 <= file_number <= 8:
-                return True
-            # All test-only categories
-            elif category in test_only_categories:
-                return True
-        
-        return False
+        print(f"Dataset loaded: {len(self.image_ids)} images")
+        print(f"Filtered to {len(cats)} classes from EXPECTED_CLASSES")
+        print(f"Total classes (including background): {self.num_classes}")
     
     def __len__(self):
-        return len(self.img_files)
-
-    def __getitem__(self, idx):
-        # Load image
-        img_path = os.path.join(self.root_dir, self.img_files[idx])
-        img = Image.open(img_path).convert("RGB")
-        
-        # Apply letterboxing to match training preprocessing
-        if self.image_size:
-            img = self._letterbox_image(img)
-        
-        # Load annotations
-        ann_path = img_path.replace('.jpg', '+recto.txt')
-        boxes = []
-        labels = []
-
-        if os.path.exists(ann_path):
-            boxes, labels = self._parse_annotation(ann_path)
-        
-        # Convert to tensors (handle empty annotations)
-        if len(boxes) == 0:
-            boxes = torch.zeros((0, 4), dtype=torch.float32)
-            labels = torch.zeros((0,), dtype=torch.long)
-        else:
-            boxes = torch.tensor(boxes, dtype=torch.float32)
-            labels = torch.tensor(labels, dtype=torch.long)
-
-        # Apply transforms if specified
-        if self.transforms:
-            img = self.transforms(img)
-        
-        # Return format expected by your training pipeline
-        return img, labels, boxes
+        return len(self.image_ids)
     
     def __getitem__(self, idx):
-        # Load image
-        img_path = os.path.join(self.root_dir, self.img_files[idx])
-        img = Image.open(img_path).convert("RGB")
-        original_size = img.size  # (width, height)
+        # Get image info from COCO
+        img_id = self.image_ids[idx]
+        img_info = self.coco.loadImgs([img_id])[0]
         
-        # Load annotations BEFORE letterboxing
-        ann_path = img_path.replace('.jpg', '+recto.txt')
+        # FIXED: Proper image path construction
+        # Check both root directory and data subdirectory
+        img_path = self.split_dir / img_info['file_name']
+        if not img_path.exists():
+            img_path = self.split_dir / "data" / img_info['file_name']
+        
+        if not img_path.exists():
+            raise FileNotFoundError(f"Image not found: {img_info['file_name']}")
+        
+        # Load image
+        img = Image.open(img_path).convert("RGB")
+        original_size = img.size
+        
+        # FIXED: Load annotations from COCO (not .txt files!)
+        ann_ids = self.coco.getAnnIds(imgIds=img_id)
+        anns = self.coco.loadAnns(ann_ids)
+        
         boxes = []
         labels = []
         
-        if os.path.exists(ann_path):
-            boxes, labels = self._parse_annotation(ann_path)
+        for ann in anns:
+            # Filter by area
+            if ann['area'] < self.min_area:
+                continue
             
-            # Transform coordinates for letterboxing
-            if self.image_size and boxes:
-                boxes = self._transform_coordinates_for_letterbox(
-                    boxes, original_size, self.image_size
-                )
+            # Get bounding box in COCO format [x, y, width, height]
+            x, y, w, h = ann['bbox']
+            box = [x, y, x + w, y + h]  # Convert to [x1, y1, x2, y2]
+            
+            # PRESERVED: Use your original category filtering logic
+            cat_id = ann['category_id']
+            if cat_id in self.cat_id_to_contiguous:
+                contiguous_id = self.cat_id_to_contiguous[cat_id]
+                boxes.append(box)
+                labels.append(contiguous_id)
         
-        # Apply letterboxing to image
+        # Apply max detections limit
+        if self.max_detections and len(boxes) > self.max_detections:
+            boxes = boxes[:self.max_detections]
+            labels = labels[:self.max_detections]
+        
+        # Resize image and adjust bounding boxes
         if self.image_size:
-            img = self._letterbox_image(img)
+            img, boxes = self._resize_image_and_boxes(img, boxes, original_size)
         
         # Convert image to tensor
         img_np = np.array(img).astype(np.float32) / 255.0
@@ -252,151 +121,73 @@ class DSBIData(torch.utils.data.Dataset):
             labels = torch.tensor(labels, dtype=torch.long)
         
         return img_tensor, labels, boxes
-
     
-    def _dots_to_braille_class(self, dots):
-        """Convert 6-dot pattern to Braille character class (1-26 for a-z)"""
-        # Standard Braille alphabet patterns
-        braille_patterns = {
-            (1,0,0,0,0,0): 1,   # a
-            (1,1,0,0,0,0): 2,   # b
-            (1,0,0,1,0,0): 3,   # c
-            (1,0,0,1,1,0): 4,   # d
-            (1,0,0,0,1,0): 5,   # e
-            (1,1,0,1,0,0): 6,   # f
-            (1,1,0,1,1,0): 7,   # g
-            (1,1,0,0,1,0): 8,   # h
-            (0,1,0,1,0,0): 9,   # i
-            (0,1,0,1,1,0): 10,  # j
-            (1,0,1,0,0,0): 11,  # k
-            (1,1,1,0,0,0): 12,  # l
-            (1,0,1,1,0,0): 13,  # m
-            (1,0,1,1,1,0): 14,  # n
-            (1,0,1,0,1,0): 15,  # o
-            (1,1,1,1,0,0): 16,  # p
-            (1,1,1,1,1,0): 17,  # q
-            (1,1,1,0,1,0): 18,  # r
-            (0,1,1,1,0,0): 19,  # s
-            (0,1,1,1,1,0): 20,  # t
-            (1,0,1,0,0,1): 21,  # u
-            (1,1,1,0,0,1): 22,  # v
-            (0,1,0,1,1,1): 23,  # w
-            (1,0,1,1,0,1): 24,  # x
-            (1,0,1,1,1,1): 25,  # y
-            (1,0,1,0,1,1): 26,  # z
-        }
+    def _resize_image_and_boxes(self, img, boxes, original_size):
+        """Resize image while maintaining aspect ratio and adjust bounding boxes"""
+        target_w, target_h = self.image_size
+        orig_w, orig_h = original_size
         
-        dots_tuple = tuple(dots)
-        return braille_patterns.get(dots_tuple, 1)  # Default to 'a' if pattern not found
-
+        # Calculate scale factors
+        scale_w = target_w / orig_w
+        scale_h = target_h / orig_h
+        scale = min(scale_w, scale_h)  # Maintain aspect ratio
+        
+        # Calculate new dimensions
+        new_w = int(orig_w * scale)
+        new_h = int(orig_h * scale)
+        
+        # Resize image
+        img = img.resize((new_w, new_h), Image.LANCZOS)
+        
+        # Create new image with target size (letterbox with padding)
+        new_img = Image.new('RGB', (target_w, target_h), (128, 128, 128))
+        
+        # Calculate padding
+        pad_x = (target_w - new_w) // 2
+        pad_y = (target_h - new_h) // 2
+        
+        # Paste resized image onto padded canvas
+        new_img.paste(img, (pad_x, pad_y))
+        
+        # Adjust bounding boxes
+        adjusted_boxes = []
+        for box in boxes:
+            x1, y1, x2, y2 = box
+            
+            # Scale coordinates
+            x1 = x1 * scale + pad_x
+            y1 = y1 * scale + pad_y
+            x2 = x2 * scale + pad_x
+            y2 = y2 * scale + pad_y
+            
+            # Ensure boxes are within image bounds
+            x1 = max(0, min(x1, target_w))
+            y1 = max(0, min(y1, target_h))
+            x2 = max(0, min(x2, target_w))
+            y2 = max(0, min(y2, target_h))
+            
+            # Only keep valid boxes
+            if x2 > x1 and y2 > y1:
+                adjusted_boxes.append([x1, y1, x2, y2])
+        
+        return new_img, adjusted_boxes
+    
     def get_num_classes(self):
         return self.num_classes
-
+    
     def get_class_names(self):
-        """Return class names compatible with your training pipeline"""
-        class_names = ['__background__'] + [chr(ord('a') + i) for i in range(26)]
-        print(f"Class names: {class_names}")
-        print(f"Total class names: {len(class_names)}")
-        return class_names
-    
-    def _parse_annotation(self, ann_path):
-        """Parse DSBI annotation format with proper error handling"""
-        boxes = []
-        labels = []
+        """PRESERVED: Your original class names logic"""
+        cats = self.coco.loadCats(self.coco.getCatIds())
+        cats = [cat for cat in cats if cat['name'] in EXPECTED_CLASSES]  # Keep filtering
+        cats = sorted(cats, key=lambda x: x['id'])
         
-        try:
-            with open(ann_path, 'r', encoding='utf-8') as f:
-                lines = [line.strip() for line in f.readlines()]
-            
-            if len(lines) < 3:
-                print(f"Warning: Invalid annotation file {ann_path} - insufficient lines")
-                return boxes, labels
-            
-            # Parse skew angle (line 1) - currently not used but could be important
-            try:
-                skew_angle = float(lines[0])
-            except ValueError:
-                print(f"Warning: Invalid skew angle in {ann_path}")
-                skew_angle = 0.0
-            
-            # Parse vertical lines (line 2)
-            try:
-                vertical_lines = list(map(int, lines[1].split()))
-                if len(vertical_lines) % 2 != 0:
-                    print(f"Warning: Odd number of vertical lines in {ann_path}")
-            except ValueError:
-                print(f"Warning: Invalid vertical lines in {ann_path}")
-                return boxes, labels
-            
-            # Parse horizontal lines (line 3)
-            try:
-                horizontal_lines = list(map(int, lines[2].split()))
-                if len(horizontal_lines) % 3 != 0:
-                    print(f"Warning: Horizontal lines not multiple of 3 in {ann_path}")
-            except ValueError:
-                print(f"Warning: Invalid horizontal lines in {ann_path}")
-                return boxes, labels
-            
-            # Parse cell data (lines 4+)
-            for line_idx, line in enumerate(lines[3:], start=4):
-                if not line.strip():
-                    continue
-                    
-                parts = line.split()
-                if len(parts) != 8:
-                    print(f"Warning: Invalid cell data at line {line_idx} in {ann_path}")
-                    continue
-                
-                try:
-                    row_num = int(parts[0])  # 1-based
-                    col_num = int(parts[1])  # 1-based
-                    dots = list(map(int, parts[2:8]))
-                except ValueError:
-                    print(f"Warning: Invalid numbers at line {line_idx} in {ann_path}")
-                    continue
-                
-                # Validate indices (convert to 0-based for array access)
-                row_idx = row_num - 1
-                col_idx = col_num - 1
-                
-                # Check bounds for vertical lines
-                if col_idx < 0 or col_idx >= len(vertical_lines) or (col_idx + 1) >= len(vertical_lines):
-                    print(f"Warning: Column index {col_num} out of bounds in {ann_path}")
-                    continue
-                
-                # Check bounds for horizontal lines
-                if row_idx < 0 or row_idx >= len(horizontal_lines) or (row_idx + 1) >= len(horizontal_lines):
-                    print(f"Warning: Row index {row_num} out of bounds in {ann_path}")
-                    continue
-                
-                # Calculate bounding box coordinates
-                x_min = vertical_lines[col_idx]
-                x_max = vertical_lines[col_idx + 1]
-                y_min = horizontal_lines[row_idx]
-                y_max = horizontal_lines[row_idx + 1]
-                
-                # Validate bounding box
-                if x_max <= x_min or y_max <= y_min:
-                    print(f"Warning: Invalid bounding box [{x_min}, {y_min}, {x_max}, {y_max}] in {ann_path}")
-                    continue
-                
-                # Check if bounding box has minimum area
-                area = (x_max - x_min) * (y_max - y_min)
-                if area < self.min_area:
-                    continue
-                
-                boxes.append([x_min, y_min, x_max, y_max])
-                
-                # Convert dots pattern to Braille character class
-                braille_class = self._dots_to_braille_class(dots)
-                labels.append(braille_class)
+        # Debug output (preserved from your original)
+        for c in cats:
+            print(f"Class {c['id']}: {c['name']}")
         
-        except Exception as e:
-            print(f"Error parsing annotation {ann_path}: {e}")
-        
-        return boxes, labels
+        return ['__background__'] + [c['name'] for c in cats]
 
-    
+
 def collate_fn(batch):
     """Standard collate function that stacks tensors"""
     images = []
