@@ -98,11 +98,12 @@ class COCOData(Dataset):
         return ['__background__'] + [c['name'] for c in cats]
     
 class DSBIData(torch.utils.data.Dataset):
-    def __init__(self, root_dir, split='train', file_list=None, transforms=None,min_area=2, image_size=(700, 1024)):
+    def __init__(self, root_dir, split='train', file_list=None, transforms=None, min_area=2, image_size=(700, 1024)):
         self.root_dir = root_dir
         self.split = split
         self.transforms = transforms
         self.image_size = image_size
+        self.min_area = min_area
         
         # Set number of classes (background + 26 Braille characters)
         self.num_classes = 27
