@@ -68,11 +68,32 @@ def train(train_dir: pathlib.Path, val_dir: pathlib.Path, writer, resume_ckpt_pa
     print("Creating datasets...")
     train_dataset = DSBIData(train_dir, image_size=IMAGE_SIZE, min_area=2)
     val_dataset = DSBIData(val_dir, image_size=IMAGE_SIZE, min_area=2)
-    
-    num_classes = train_dataset.get_num_classes()
-    class_names = train_dataset.get_class_names()
-    print(f"Number of classes: {num_classes}")
-    print(f"CPU count: {os.cpu_count()}")
+    # Test annotation parsing
+    sample_idx = 0
+    img_path = os.path.join(train_dataset.root_dir, train_dataset.img_files[sample_idx])
+    ann_path = img_path.replace('.jpg', '+recto.txt')
+
+    print(f"Testing annotation: {ann_path}")
+    if os.path.exists(ann_path):
+        with open(ann_path, 'r') as f:
+            lines = f.readlines()
+        
+        print(f"Annotation has {len(lines)} lines")
+        for i, line in enumerate(lines[:10]):  # Print first 10 lines
+            print(f"Line {i+1}: {line.strip()}")
+        
+        # Test parsing
+        boxes, labels = train_dataset._parse_annotation(ann_path)
+        print(f"Parsed {len(boxes)} boxes and {len(labels)} labels")
+        if boxes:
+            print(f"First box: {boxes[0]}")
+            print(f"First label: {labels[0]}")
+
+        
+        num_classes = train_dataset.get_num_classes()
+        class_names = train_dataset.get_class_names()
+        print(f"Number of classes: {num_classes}")
+        print(f"CPU count: {os.cpu_count()}")
     
     # Data loaders with pin_memory for faster GPU transfer
     train_loader = DataLoader(
