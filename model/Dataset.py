@@ -49,37 +49,42 @@ class COCOData(Dataset):
         return len(self.image_ids)
 
     def __getitem__(self, idx):
-        img_id = self.image_ids[idx]
-        info = self.coco.imgs[img_id]
-        img_path = self.images_dir / info['file_name']
-        
-        # Load image (already resized and padded by Roboflow)
+        # Load image
+        img_path = os.path.join(self.root_dir, self.img_files[idx])
         img = Image.open(img_path).convert("RGB")
+        original_size = img.size  # (width, height)
         
-        # Simple conversion to tensor (no resizing/padding needed)
+        # Load annotations BEFORE letterboxing
+        ann_path = img_path.replace('.jpg', '+recto.txt')
+        boxes = []
+        labels = []
+        
+        if os.path.exists(ann_path):
+            boxes, labels = self._parse_annotation(ann_path)
+            
+            # Transform coordinates for letterboxing
+            if self.image_size and boxes:
+                boxes = self._transform_coordinates_for_letterbox(
+                    boxes, original_size, self.image_size
+                )
+        
+        # Apply letterboxing to image
+        if self.image_size:
+            img = self._letterbox_image(img)
+        
+        # Convert image to tensor
         img_np = np.array(img).astype(np.float32) / 255.0
-        img_tensor = torch.from_numpy(img_np.transpose(2,0,1)).float()
+        img_tensor = torch.from_numpy(img_np.transpose(2, 0, 1)).float()
         
-        # Load annotations (coordinates already match the processed image)
-        ann_ids = self.coco.getAnnIds(imgIds=img_id)
-        anns = self.coco.loadAnns(ann_ids)
-
-        
-        boxes, labels = [], []
-        for ann in anns:
-            x, y, w, h = ann['bbox']
-            boxes.append([x, y, x + w, y + h])
-            labels.append(self.cat_id_to_contiguous[ann['category_id']])
-        
-        # Convert to tensors
-        if boxes:
-            box_tensor = torch.tensor(boxes, dtype=torch.float32)
-            label_tensor = torch.tensor(labels, dtype=torch.long)
+        # Convert to tensors (handle empty annotations)
+        if len(boxes) == 0:
+            boxes = torch.zeros((0, 4), dtype=torch.float32)
+            labels = torch.zeros((0,), dtype=torch.long)
         else:
-            box_tensor = torch.zeros((0,4), dtype=torch.float32)
-            label_tensor = torch.zeros((0,), dtype=torch.long)
+            boxes = torch.tensor(boxes, dtype=torch.float32)
+            labels = torch.tensor(labels, dtype=torch.long)
         
-        return img_tensor, label_tensor, box_tensor
+        return img_tensor, labels, boxes
 
         
     def get_num_classes(self):
@@ -209,75 +214,44 @@ class DSBIData(torch.utils.data.Dataset):
         # Return format expected by your training pipeline
         return img, labels, boxes
     
-    def _letterbox_image(self, img):
-        """Apply letterboxing to match training preprocessing"""
-        target_w, target_h = self.image_size
-        orig_w, orig_h = img.size
+    def __getitem__(self, idx):
+        # Load image
+        img_path = os.path.join(self.root_dir, self.img_files[idx])
+        img = Image.open(img_path).convert("RGB")
+        original_size = img.size  # (width, height)
         
-        # Calculate scale to maintain aspect ratio
-        scale = min(target_w / orig_w, target_h / orig_h)
-        new_w, new_h = int(orig_w * scale), int(orig_h * scale)
-        
-        # Resize image
-        img_resized = img.resize((new_w, new_h), Image.LANCZOS)
-        
-        # Create letterboxed image with black padding
-        letterboxed = Image.new('RGB', (target_w, target_h), (0, 0, 0))
-        
-        # Calculate paste position (center)
-        paste_x = (target_w - new_w) // 2
-        paste_y = (target_h - new_h) // 2
-        
-        # Paste resized image onto letterboxed background
-        letterboxed.paste(img_resized, (paste_x, paste_y))
-        
-        return letterboxed
-    
-    def _parse_annotation(self, ann_path):
-        """Parse DSBI annotation format"""
+        # Load annotations BEFORE letterboxing
+        ann_path = img_path.replace('.jpg', '+recto.txt')
         boxes = []
         labels = []
         
-        try:
-            with open(ann_path, 'r') as f:
-                lines = f.readlines()
-                
-                if len(lines) >= 3:
-                    # Parse grid structure
-                    vertical_lines = list(map(int, lines[1].strip().split()))
-                    horizontal_lines = list(map(int, lines[2].strip().split()))
-                    
-                    # Parse cell data
-                    cell_lines = lines[3:]
-                    for line in cell_lines:
-                        parts = line.strip().split()
-                        if len(parts) == 8:
-                            row_num = int(parts[0])
-                            col_num = int(parts[1])
-                            dots = list(map(int, parts[2:]))
-                            
-                            # Calculate bounding box coordinates
-                            if (col_num <= len(vertical_lines) and 
-                                row_num <= len(horizontal_lines) and
-                                col_num > 0 and row_num > 0):
-                                
-                                x_min = vertical_lines[col_num-1]
-                                x_max = vertical_lines[col_num] if col_num < len(vertical_lines) else vertical_lines[-1]
-                                y_min = horizontal_lines[row_num-1]
-                                y_max = horizontal_lines[row_num] if row_num < len(horizontal_lines) else horizontal_lines[-1]
-
-                                # Only add if valid bounding box
-                                if x_max > x_min and y_max > y_min:
-                                    boxes.append([x_min, y_min, x_max, y_max])
-                                    
-                                    # Convert dots pattern to Braille character class
-                                    braille_class = self._dots_to_braille_class(dots)
-                                    labels.append(braille_class)
-                                    
-        except Exception as e:
-            print(f"Warning: Error parsing annotation {ann_path}: {e}")
+        if os.path.exists(ann_path):
+            boxes, labels = self._parse_annotation(ann_path)
+            
+            # Transform coordinates for letterboxing
+            if self.image_size and boxes:
+                boxes = self._transform_coordinates_for_letterbox(
+                    boxes, original_size, self.image_size
+                )
         
-        return boxes, labels
+        # Apply letterboxing to image
+        if self.image_size:
+            img = self._letterbox_image(img)
+        
+        # Convert image to tensor
+        img_np = np.array(img).astype(np.float32) / 255.0
+        img_tensor = torch.from_numpy(img_np.transpose(2, 0, 1)).float()
+        
+        # Convert to tensors (handle empty annotations)
+        if len(boxes) == 0:
+            boxes = torch.zeros((0, 4), dtype=torch.float32)
+            labels = torch.zeros((0,), dtype=torch.long)
+        else:
+            boxes = torch.tensor(boxes, dtype=torch.float32)
+            labels = torch.tensor(labels, dtype=torch.long)
+        
+        return img_tensor, labels, boxes
+
     
     def _dots_to_braille_class(self, dots):
         """Convert 6-dot pattern to Braille character class (1-26 for a-z)"""
@@ -323,6 +297,104 @@ class DSBIData(torch.utils.data.Dataset):
         print(f"Class names: {class_names}")
         print(f"Total class names: {len(class_names)}")
         return class_names
+    
+    def _parse_annotation(self, ann_path):
+        """Parse DSBI annotation format with proper error handling"""
+        boxes = []
+        labels = []
+        
+        try:
+            with open(ann_path, 'r', encoding='utf-8') as f:
+                lines = [line.strip() for line in f.readlines()]
+            
+            if len(lines) < 3:
+                print(f"Warning: Invalid annotation file {ann_path} - insufficient lines")
+                return boxes, labels
+            
+            # Parse skew angle (line 1) - currently not used but could be important
+            try:
+                skew_angle = float(lines[0])
+            except ValueError:
+                print(f"Warning: Invalid skew angle in {ann_path}")
+                skew_angle = 0.0
+            
+            # Parse vertical lines (line 2)
+            try:
+                vertical_lines = list(map(int, lines[1].split()))
+                if len(vertical_lines) % 2 != 0:
+                    print(f"Warning: Odd number of vertical lines in {ann_path}")
+            except ValueError:
+                print(f"Warning: Invalid vertical lines in {ann_path}")
+                return boxes, labels
+            
+            # Parse horizontal lines (line 3)
+            try:
+                horizontal_lines = list(map(int, lines[2].split()))
+                if len(horizontal_lines) % 3 != 0:
+                    print(f"Warning: Horizontal lines not multiple of 3 in {ann_path}")
+            except ValueError:
+                print(f"Warning: Invalid horizontal lines in {ann_path}")
+                return boxes, labels
+            
+            # Parse cell data (lines 4+)
+            for line_idx, line in enumerate(lines[3:], start=4):
+                if not line.strip():
+                    continue
+                    
+                parts = line.split()
+                if len(parts) != 8:
+                    print(f"Warning: Invalid cell data at line {line_idx} in {ann_path}")
+                    continue
+                
+                try:
+                    row_num = int(parts[0])  # 1-based
+                    col_num = int(parts[1])  # 1-based
+                    dots = list(map(int, parts[2:8]))
+                except ValueError:
+                    print(f"Warning: Invalid numbers at line {line_idx} in {ann_path}")
+                    continue
+                
+                # Validate indices (convert to 0-based for array access)
+                row_idx = row_num - 1
+                col_idx = col_num - 1
+                
+                # Check bounds for vertical lines
+                if col_idx < 0 or col_idx >= len(vertical_lines) or (col_idx + 1) >= len(vertical_lines):
+                    print(f"Warning: Column index {col_num} out of bounds in {ann_path}")
+                    continue
+                
+                # Check bounds for horizontal lines
+                if row_idx < 0 or row_idx >= len(horizontal_lines) or (row_idx + 1) >= len(horizontal_lines):
+                    print(f"Warning: Row index {row_num} out of bounds in {ann_path}")
+                    continue
+                
+                # Calculate bounding box coordinates
+                x_min = vertical_lines[col_idx]
+                x_max = vertical_lines[col_idx + 1]
+                y_min = horizontal_lines[row_idx]
+                y_max = horizontal_lines[row_idx + 1]
+                
+                # Validate bounding box
+                if x_max <= x_min or y_max <= y_min:
+                    print(f"Warning: Invalid bounding box [{x_min}, {y_min}, {x_max}, {y_max}] in {ann_path}")
+                    continue
+                
+                # Check if bounding box has minimum area
+                area = (x_max - x_min) * (y_max - y_min)
+                if area < self.min_area:
+                    continue
+                
+                boxes.append([x_min, y_min, x_max, y_max])
+                
+                # Convert dots pattern to Braille character class
+                braille_class = self._dots_to_braille_class(dots)
+                labels.append(braille_class)
+        
+        except Exception as e:
+            print(f"Error parsing annotation {ann_path}: {e}")
+        
+        return boxes, labels
+
     
 def collate_fn(batch):
     """Standard collate function that stacks tensors"""
