@@ -14,7 +14,7 @@ from inference import detections_from_network_output
 from FPN import FPN, normalize_batch, FocalLoss
 from Targets import generate_targets
 from loss import _compute_loss
-from Dataset import DSBIData, COCOData, collate_fn
+from Dataset import DSBIData, collate_fn,COCOData
 
 logger = logging.getLogger(__name__)
 
