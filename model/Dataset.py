@@ -6,6 +6,8 @@ import numpy as np
 from PIL import Image
 from pycocotools.coco import COCO
 import os 
+import re
+
 EXPECTED_CLASSES = ['a', 'b', 'c', 'd', 'e', 'f', 'g', 'h', 'i', 'j', 'k', 'l', 'm', 
                    'n', 'o', 'p', 'q', 'r', 's', 't', 'u', 'v', 'w', 'x', 'y', 'z']
 
@@ -90,30 +92,6 @@ class COCOData(Dataset):
             print(f"Class {c['id']}: {c['name']}")
         return ['__background__'] + [c['name'] for c in cats]
     
-def collate_fn(batch):
-    """Standard collate function that stacks tensors"""
-    images = []
-    labels = []
-    boxes = []
-    
-    max_h = max(img.shape[1] for img, _, _ in batch)
-    max_w = max(img.shape[2] for img, _, _ in batch)
-    
-    for img, label, box in batch:
-        # Pad image to max size
-        h, w = img.shape[1], img.shape[2]
-        padded_img = torch.zeros(3, max_h, max_w)
-        padded_img[:, :h, :w] = img
-        
-        images.append(padded_img)
-        labels.append(label)
-        boxes.append(box)
-    
-    # Stack into tensors
-    images = torch.stack(images)
-    return images, labels, boxes
-
-
 class DSBIData(torch.utils.data.Dataset):
     def __init__(self, root_dir, split='train', file_list=None, transforms=None,min_area=2, image_size=(700, 1024)):
         self.root_dir = root_dir
@@ -345,3 +323,27 @@ class DSBIData(torch.utils.data.Dataset):
         print(f"Class names: {class_names}")
         print(f"Total class names: {len(class_names)}")
         return class_names
+    
+def collate_fn(batch):
+    """Standard collate function that stacks tensors"""
+    images = []
+    labels = []
+    boxes = []
+    
+    max_h = max(img.shape[1] for img, _, _ in batch)
+    max_w = max(img.shape[2] for img, _, _ in batch)
+    
+    for img, label, box in batch:
+        # Pad image to max size
+        h, w = img.shape[1], img.shape[2]
+        padded_img = torch.zeros(3, max_h, max_w)
+        padded_img[:, :h, :w] = img
+        
+        images.append(padded_img)
+        labels.append(label)
+        boxes.append(box)
+    
+    # Stack into tensors
+    images = torch.stack(images)
+    return images, labels, boxes
+
