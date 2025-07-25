@@ -14,7 +14,7 @@ from inference import detections_from_network_output
 from FPN import FPN, normalize_batch, FocalLoss
 from Targets import generate_targets
 from loss import _compute_loss
-from Dataset import DSBIData, collate_fn,COCOData 
+from Dataset import collate_fn,COCOData 
 import re
 logger = logging.getLogger(__name__)
 
@@ -66,8 +66,8 @@ def train(train_dir: pathlib.Path, val_dir: pathlib.Path, writer, resume_ckpt_pa
         raise FileNotFoundError(f"Validation directory not found: {val_dir.absolute()}")
     
     print("Creating datasets...")
-    train_dataset = DSBIData(train_dir, image_size=IMAGE_SIZE, min_area=2)
-    val_dataset = DSBIData(val_dir, image_size=IMAGE_SIZE, min_area=2)
+    train_dataset = COCOData(train_dir, image_size=IMAGE_SIZE, min_area=2)
+    val_dataset = COCOData(val_dir, image_size=IMAGE_SIZE, min_area=2)
     
     
     num_classes = train_dataset.get_num_classes()
