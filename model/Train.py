@@ -66,8 +66,8 @@ def train(train_dir: pathlib.Path, val_dir: pathlib.Path, writer, resume_ckpt_pa
         raise FileNotFoundError(f"Validation directory not found: {val_dir.absolute()}")
     
     print("Creating datasets...")
-    train_dataset = COCOData(train_dir, image_size=IMAGE_SIZE, min_area=2)
-    val_dataset = COCOData(val_dir, image_size=IMAGE_SIZE, min_area=2)
+    train_dataset = DSBIData(train_dir, image_size=IMAGE_SIZE, min_area=2)
+    val_dataset = DSBIData(val_dir, image_size=IMAGE_SIZE, min_area=2)
     
     num_classes = train_dataset.get_num_classes()
     class_names = train_dataset.get_class_names()
