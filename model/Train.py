@@ -20,7 +20,11 @@ logger = logging.getLogger(__name__)
 
 import os
 os.environ['PYTORCH_CUDA_ALLOC_CONF'] = 'max_split_size_mb:128,expandable_segments:True'
+import sys
+sys.path.append('fcos_scratch/model')
 
+# Now you can import
+from Dataset import DSBIData, collate_fn
 
 def tensor_to_image(tensor):
     """Convert tensor to numpy array for visualization"""
