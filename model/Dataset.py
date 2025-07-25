@@ -114,14 +114,8 @@ def collate_fn(batch):
     return images, labels, boxes
 
 
-import os
-import torch
-from torch.utils.data import Dataset
-from PIL import Image
-import re
-
 class DSBIData(torch.utils.data.Dataset):
-    def __init__(self, root_dir, split='train', file_list=None, transforms=None, image_size=(700, 1024)):
+    def __init__(self, root_dir, split='train', file_list=None, transforms=None,min_area=2, image_size=(700, 1024)):
         self.root_dir = root_dir
         self.split = split
         self.transforms = transforms
