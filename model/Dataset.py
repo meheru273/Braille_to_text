@@ -1,4 +1,3 @@
-
 import pathlib
 import torch
 from torch.utils.data import Dataset
@@ -6,12 +5,13 @@ import numpy as np
 from PIL import Image
 from pycocotools.coco import COCO
 import os 
+
 EXPECTED_CLASSES = ['a', 'b', 'c', 'd', 'e', 'f', 'g', 'h', 'i', 'j', 'k', 'l', 'm', 
                    'n', 'o', 'p', 'q', 'r', 's', 't', 'u', 'v', 'w', 'x', 'y', 'z']
 
 class COCOData(Dataset):
     """
-    Enhanced COCO dataset with proper preprocessing for Braille detection
+    Enhanced COCO dataset with robust category ID handling
     """
     def __init__(self,
                  split_dir: pathlib.Path,
@@ -21,27 +21,41 @@ class COCOData(Dataset):
         self.split_dir = pathlib.Path(split_dir)
         if not self.split_dir.exists():
             raise FileNotFoundError(f"Folder not found: {self.split_dir}")
+        
         # Find annotation JSON
         jsons = list(self.split_dir.glob("*.json"))
         if not jsons:
             raise FileNotFoundError(f"No JSON annotation file in {self.split_dir}")
-        ann_file = next((jf for jf in jsons if "annotation" in jf.name.lower()), jsons[0])
+        ann_file = next((jf for jf in jsons if jf.name.lower().startswith(("train", "val", "valid", "annotations"))), jsons[0])
         
         print(f"Loading COCO annotations from: {ann_file}")
         self.coco = COCO(str(ann_file))
         self.images_dir = self.split_dir
         self.image_ids = list(self.coco.imgs.keys())
+        
         # Configurable parameters
-        self.image_size = image_size  # (width, height)
+        self.image_size = image_size
         self.min_area = min_area
         self.max_detections = max_detections
 
-        # Map original COCO category IDs to contiguous 1..N
-        cats = self.coco.loadCats(self.coco.getCatIds())
-        cats = [cat for cat in cats if cat['name'] in EXPECTED_CLASSES]
-        cats = sorted(cats, key=lambda x: x['id'])
-        self.cat_id_to_contiguous = {cat['id']: i+1 for i, cat in enumerate(cats)}
-        self.num_classes = len(cats) + 1  # +1 for background=0
+        # Map ALL COCO category IDs to contiguous 1..N, filtering only expected classes
+        all_cats = self.coco.loadCats(self.coco.getCatIds())
+        valid_cats = [cat for cat in all_cats if cat['name'] in EXPECTED_CLASSES]
+        
+        if not valid_cats:
+            raise ValueError("No valid categories found in the dataset matching expected classes")
+        
+        # Create mapping from original ID to contiguous ID
+        sorted_cats = sorted(valid_cats, key=lambda x: x['id'])
+        self.cat_id_to_contiguous = {}
+        self.contiguous_to_name = {}
+        
+        for i, cat in enumerate(sorted_cats):
+            self.cat_id_to_contiguous[cat['id']] = i + 1
+            self.contiguous_to_name[i + 1] = cat['name']
+        
+        self.num_classes = len(sorted_cats) + 1  # +1 for background=0
+        print(f"Mapped {len(self.cat_id_to_contiguous)} categories to contiguous IDs")
 
     def __len__(self):
         return len(self.image_ids)
@@ -50,72 +64,81 @@ class COCOData(Dataset):
         img_id = self.image_ids[idx]
         info = self.coco.imgs[img_id]
         img_path = self.images_dir / info['file_name']
-        print(f"Image ID: {img_id} | File: {img_path.name}")
+        
+        # Handle potential path issues
+        if not img_path.exists():
+            # Try different naming variations
+            possible_paths = [
+                self.images_dir / info['file_name'],
+                self.images_dir / Path(info['file_name']).name,
+                self.images_dir / "images" / Path(info['file_name']).name,
+                self.images_dir / "data" / Path(info['file_name']).name
+            ]
+            for p in possible_paths:
+                if p.exists():
+                    img_path = p
+                    break
+            else:
+                raise FileNotFoundError(f"Image not found: {info['file_name']} in {self.images_dir}")
         
         # Load image
         img = Image.open(img_path).convert("RGB")
-        
         img_np = np.array(img).astype(np.float32) / 255.0
-        img_tensor = torch.from_numpy(img_np.transpose(2,0,1)).float()
+        img_tensor = torch.from_numpy(img_np.transpose(2, 0, 1)).float()
         
         # Load annotations
         ann_ids = self.coco.getAnnIds(imgIds=img_id)
         anns = self.coco.loadAnns(ann_ids)
         
-        print(f"Total annotations: {len(anns)}")
-        
         boxes, labels = [], []
-        # Print only first 5 annotations for debugging
+        skipped = 0
+        
         for i, ann in enumerate(anns):
+            # Skip small objects
+            if 'area' in ann and ann['area'] < self.min_area:
+                skipped += 1
+                continue
+                
+            # Handle missing category_id gracefully
+            category_id = ann.get('category_id', None)
+            if category_id is None or category_id not in self.cat_id_to_contiguous:
+                skipped += 1
+                continue
+                
+            # Convert bbox format from [x,y,w,h] to [x1,y1,x2,y2]
             x, y, w, h = ann['bbox']
             boxes.append([x, y, x + w, y + h])
-            labels.append(self.cat_id_to_contiguous[ann['category_id']])
-            
-            if i < 5:
-                print(f"  Annotation {i+1}: bbox={ann['bbox']}, category_id={ann['category_id']}, label={labels[-1]}")
-            elif i == 5:
-                print("  ... (more annotations omitted) ...")
+            labels.append(self.cat_id_to_contiguous[category_id])
         
+        if skipped:
+            print(f"Skipped {skipped} annotations in image {img_id} (invalid category or small area)")
+        
+        # Handle empty annotations
         if boxes:
             box_tensor = torch.tensor(boxes, dtype=torch.float32)
             label_tensor = torch.tensor(labels, dtype=torch.long)
         else:
-            box_tensor = torch.zeros((0,4), dtype=torch.float32)
+            box_tensor = torch.zeros((0, 4), dtype=torch.float32)
             label_tensor = torch.zeros((0,), dtype=torch.long)
         
         return img_tensor, label_tensor, box_tensor
 
+    # ... rest of the class remains the same ...
 
-        
-    def get_num_classes(self):
-        return self.num_classes
-
-    def get_class_names(self):
-        cats = self.coco.loadCats(self.coco.getCatIds())
-        cats = sorted(cats, key=lambda x: x['id'])
-        for c in cats:
-            print(f"Class {c['id']}: {c['name']}")
-        return ['__background__'] + [c['name'] for c in cats]
-    
 def collate_fn(batch):
-    """Standard collate function that stacks tensors"""
-    images = []
-    labels = []
-    boxes = []
+    """Enhanced collate function with dynamic padding"""
+    images, labels, boxes = zip(*batch)
     
-    max_h = max(img.shape[1] for img, _, _ in batch)
-    max_w = max(img.shape[2] for img, _, _ in batch)
+    # Find max dimensions
+    max_h = max(img.shape[1] for img in images)
+    max_w = max(img.shape[2] for img in images)
     
-    for img, label, box in batch:
-        # Pad image to max size
-        h, w = img.shape[1], img.shape[2]
+    padded_images = []
+    for img in images:
+        # Create padded image (C, H, W)
         padded_img = torch.zeros(3, max_h, max_w)
+        h, w = img.shape[1], img.shape[2]
         padded_img[:, :h, :w] = img
-        
-        images.append(padded_img)
-        labels.append(label)
-        boxes.append(box)
+        padded_images.append(padded_img)
     
-    # Stack into tensors
-    images = torch.stack(images)
-    return images, labels, boxes
+    return torch.stack(padded_images), labels, boxes
