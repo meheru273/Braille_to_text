@@ -169,14 +169,7 @@ class COCOData(Dataset):
         labels = []
         
         for i, ann in enumerate(anns):
-            print(f"OOO DEBUG: Processing annotation {i+1}/{len(anns)}")
             print(f"  Category ID: {ann['category_id']}, Area: {ann['area']}")
-            print(f"  Bbox: {ann['bbox']}")
-            
-            # Filter by area
-            if ann['area'] < self.min_area:
-                print(f"  Skipped: area {ann['area']} < min_area {self.min_area}")
-                continue
             
             # Get bounding box in COCO format [x, y, width, height]
             x, y, w, h = ann['bbox']
@@ -207,12 +200,6 @@ class COCOData(Dataset):
                 print(f"❌ WARNING: Invalid box {i}: {box}")
             if x1 < 0 or y1 < 0 or x2 > original_size[0] or y2 > original_size[1]:
                 print(f"❌ WARNING: Box {i} outside image bounds: {box}, image size: {original_size}")
-        
-        # Apply max detections limit
-        if self.max_detections and len(boxes) > self.max_detections:
-            boxes = boxes[:self.max_detections]
-            labels = labels[:self.max_detections]
-            print(f"OOO DEBUG: Limited to {self.max_detections} detections")
         
         # Resize image and adjust bounding boxes
         if self.image_size:

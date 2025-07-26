@@ -5,13 +5,13 @@ from FPN import FPN
 from inference import compute_detections, render_detections_to_image, tensor_to_image
 from PostProcessing import (generate_colors, non_max_suppression, 
                            refine_large_boxes, letterbox_image,
-                           map_detections)
+                           map_detections,compute_iou)
 
 from torchviz import make_dot
 import torch
 
 
-def apply_postprocessing_pipeline(detections, confidence_threshold=0.01, nms_threshold=0.5):
+def apply_postprocessing_pipeline(detections, confidence_threshold=0.8, nms_threshold=0.2):
     """Apply complete postprocessing pipeline to raw detections"""
     
     if len(detections) == 0:
@@ -104,12 +104,7 @@ def main():
         img_rgb = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2RGB)
         orig_shape = img_rgb.shape
         print(f"[OK] Loaded image: {orig_shape}")
-        lab = cv2.cvtColor(img_rgb, cv2.COLOR_RGB2LAB)
-        l, a, b = cv2.split(lab)
-        clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8,8))
-        l_clahe = clahe.apply(l)
-        lab = cv2.merge((l_clahe, a, b))
-        img_rgb = cv2.cvtColor(lab, cv2.COLOR_LAB2RGB)
+        
         
         # FIXED: Properly handle letterbox_image return value
         letterbox_result = letterbox_image(img_rgb, (700, 1024))
@@ -133,7 +128,7 @@ def main():
         processed_detections = apply_postprocessing_pipeline(
             raw_detections, 
             confidence_threshold=0.01, 
-            nms_threshold=0.1
+            nms_threshold=0.5
         )
         
         # Show sample results

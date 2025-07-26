@@ -129,7 +129,7 @@ def calculate_precision_recall(all_detections, all_ground_truth, iou_threshold=0
     
     return precision, recall, f1_score
 
-def compute_detections(model, test_loader, device, class_names, image_size, confidence_threshold=0.01):
+def compute_detections(model, test_loader, device, class_names, image_size, confidence_threshold=0.5):
     model.eval()
     all_detections = []
     all_ground_truth = []
