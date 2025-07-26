@@ -42,7 +42,7 @@ class COCOData(Dataset):
         # Map ALL COCO category IDs to contiguous 1..N, filtering only expected classes
         all_cats = self.coco.loadCats(self.coco.getCatIds())
         valid_cats = [cat for cat in all_cats if cat['name'] in EXPECTED_CLASSES]
-        
+        print("total valid cats",len(valid_cats))
         if not valid_cats:
             raise ValueError("No valid categories found in the dataset matching expected classes")
         
@@ -95,10 +95,6 @@ class COCOData(Dataset):
         skipped = 0
         
         for i, ann in enumerate(anns):
-            # Skip small objects
-            if 'area' in ann and ann['area'] < self.min_area:
-                skipped += 1
-                continue
                 
             # Handle missing category_id gracefully
             category_id = ann.get('category_id', None)
