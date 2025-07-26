@@ -1,3 +1,4 @@
+
 import pathlib
 import torch
 from torch.utils.data import Dataset
@@ -5,9 +6,9 @@ import numpy as np
 from PIL import Image
 from pycocotools.coco import COCO
 import os 
-
 EXPECTED_CLASSES = ['a', 'b', 'c', 'd', 'e', 'f', 'g', 'h', 'i', 'j', 'k', 'l', 'm', 
                    'n', 'o', 'p', 'q', 'r', 's', 't', 'u', 'v', 'w', 'x', 'y', 'z']
+
 
 class COCOData(Dataset):
     """
@@ -123,8 +124,17 @@ class COCOData(Dataset):
         
         return img_tensor, label_tensor, box_tensor
 
-    # ... rest of the class remains the same ...
+     
+    def get_num_classes(self):
+        return self.num_classes
 
+    def get_class_names(self):
+        cats = self.coco.loadCats(self.coco.getCatIds())
+        cats = sorted(cats, key=lambda x: x['id'])
+        for c in cats:
+            print(f"Class {c['id']}: {c['name']}")
+        return ['__background__'] + [c['name'] for c in cats]
+    
 def collate_fn(batch):
     """Enhanced collate function with dynamic padding"""
     images, labels, boxes = zip(*batch)
