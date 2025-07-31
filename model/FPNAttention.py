@@ -278,7 +278,7 @@ def compute_loss_with_attention(
         spatial_loss = spatial_loss_fn(attention_maps, class_targets, box_targets)
         
         # Center attention loss
-        center_loss_fn = CenterAttentionLoss(weight=center_attention_weight)
+        center_loss = center_loss_fn(attention_maps, class_targets, box_targets, strides)
         center_loss_fn = center_loss_fn.to(device)  # Ensure loss function is on correct device
         center_loss = center_loss_fn(attention_maps, class_targets, box_targets)
         

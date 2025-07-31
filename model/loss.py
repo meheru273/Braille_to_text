@@ -73,7 +73,8 @@ class CenterAttentionLoss(nn.Module):
         self.sigma = sigma
         self.weight = weight
     
-    def generate_center_heatmap(self, box_targets: torch.Tensor, class_targets: torch.Tensor, size: Tuple[int, int]) -> torch.Tensor:
+    def generate_center_heatmap(self, box_targets: torch.Tensor, class_targets: torch.Tensor, 
+                               size: Tuple[int, int], stride: int) -> torch.Tensor:
         """Generate Gaussian heatmap centered at object centers"""
         B, H, W = class_targets.shape
         device = class_targets.device
@@ -93,8 +94,8 @@ class CenterAttentionLoss(nn.Module):
             obj_indices = torch.where(obj_mask)
             for i in range(len(obj_indices[0])):
                 y, x = obj_indices[0][i], obj_indices[1][i]
-                # CORRECT: Convert left/top/right/bottom to cx/cy
-                left = box_targets[b, y, x, 0] * stride  # Denormalize
+                # CORRECT: Convert left/top/right/bottom to cx/cy using provided stride
+                left = box_targets[b, y, x, 0] * stride
                 top = box_targets[b, y, x, 1] * stride
                 right = box_targets[b, y, x, 2] * stride
                 bottom = box_targets[b, y, x, 3] * stride
@@ -109,16 +110,18 @@ class CenterAttentionLoss(nn.Module):
     
     def forward(self, attention_maps: List[torch.Tensor],
                 class_targets: List[torch.Tensor],
-                box_targets: List[torch.Tensor]) -> torch.Tensor:
+                box_targets: List[torch.Tensor],
+                strides: List[int]) -> torch.Tensor:  # ADD STRIDES PARAMETER
         """Compute center attention loss"""
         total_loss = 0.0
         valid_levels = 0
         
-        for att_map, cls_t, box_t in zip(attention_maps, class_targets, box_targets):
+        for level_idx, (att_map, cls_t, box_t) in enumerate(zip(attention_maps, class_targets, box_targets)):
             B, _, H, W = att_map.shape
+            stride = strides[level_idx]  # GET STRIDE FOR THIS LEVEL
             
-            # Generate center heatmap
-            center_heatmap = self.generate_center_heatmap(box_t, cls_t, (H, W))
+            # Generate center heatmap using the correct stride
+            center_heatmap = self.generate_center_heatmap(box_t, cls_t, (H, W), stride)
             
             # Resize attention map if needed
             if att_map.shape[-2:] != center_heatmap.shape[-2:]:
