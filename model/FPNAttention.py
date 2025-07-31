@@ -47,7 +47,7 @@ class DeformableConvBlock(nn.Module):
         return self.deform_conv(x, offset)
 
 
-class ImprovedFPN(nn.Module):
+class FPN(nn.Module):
     """
     Enhanced FPN with integrated attention mechanisms for Braille detection
     """
@@ -322,3 +322,15 @@ def compute_loss_with_attention(
         return total_loss, cls_loss, reg_loss, spatial_loss, center_loss
     
     return base_loss, cls_loss, reg_loss, None, None
+
+
+def normalize_batch(x: torch.Tensor) -> torch.Tensor:
+    """Proper normalization for training and inference consistency"""
+    if x.max() > 1.0:
+        x = x / 255.0
+    
+    mean = torch.tensor([0.485, 0.456, 0.406]).to(x.device).view(1, 3, 1, 1)
+    std = torch.tensor([0.229, 0.224, 0.225]).to(x.device).view(1, 3, 1, 1)
+    
+    x = (x - mean) / std
+    return x
