@@ -23,7 +23,7 @@ class FPN(nn.Module):
         self.use_pos = use_pos  # positional attention
         
         self.strides = [2, 4, 8, 16, 32]
-        self.scales = nn.Parameter(torch.tensor([16.,32.,64.,128.,256.]))
+        self.scales = nn.Parameter(torch.tensor([8.,16.,32.,64.,128.]))
         
         # Feature channels from backbone
         backbone_channels = [64, 128, 256, 512]
@@ -119,8 +119,12 @@ class FPN(nn.Module):
         print(f"  - Number of Classes: {self.num_classes}")
     
     def _make_head(self, in_channels: int, out_channels: int) -> nn.Module:
-        """Create detection head with regular convolutions only"""
+        """Create detection head with regular convolutions and optional position attention"""
         layers = []
+        
+        if self.use_pos:
+            # Add position-aware attention first
+            layers.append(PositionAwareAttention(in_channels, reduction=16))
         
         # First layer
         layers.extend([
@@ -206,25 +210,17 @@ class FPN(nn.Module):
             att_map = self.spatial_attention[i](fused)
             attention_maps.append(att_map)
         
-        # Detection heads with optional position-aware attention
+        # Detection heads (with optional position-aware attention integrated)
         classes_by_feature = []
         regression_by_feature = []
         
         for scale, feat in zip(self.scales, fused_features):
-            # Apply position-aware attention if enabled
-            if self.use_pos:
-                cls_feat_enhanced = self.pos_attention_cls(feat)
-                reg_feat_enhanced = self.pos_attention_reg(feat)
-            else:
-                cls_feat_enhanced = feat
-                reg_feat_enhanced = feat
-            
-            # Classification
-            cls_feat = self.classification_head(cls_feat_enhanced)
+            # Classification (position attention is now integrated in the head)
+            cls_feat = self.classification_head(feat)
             classes = self.classification_to_class(cls_feat)
             
-            # Regression
-            reg_feat = self.regression_head(reg_feat_enhanced)
+            # Regression (position attention is now integrated in the head)
+            reg_feat = self.regression_head(feat)
             bbox_pred = torch.exp(self.regression_to_bbox(reg_feat)) * scale
             
             # Reshape outputs
@@ -248,6 +244,10 @@ def compute_loss_with_attention(
     
     # Get device from input tensors
     device = classes[0].device if len(classes) > 0 else torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    
+    # Ensure strides is provided - use default if not
+    if strides is None:
+        strides = [2, 4, 8, 16, 32]  # Default FPN strides
     
     # Compute base losses (classification and regression)
     base_loss, cls_loss, reg_loss = _compute_loss(
