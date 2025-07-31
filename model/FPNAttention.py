@@ -3,55 +3,15 @@ import torch.nn as nn
 import torch.nn.functional as F
 import math
 from typing import List, Tuple, Optional
-from torchvision.ops import DeformConv2d
-from Attention import (CoordinateAttention, CBAM)
+from Attention import (CoordinateAttention, CBAM, PositionAwareAttention)
 from loss import _compute_loss, SpatialAttentionLoss, CenterAttentionLoss, FocalLoss
-
-
-class DeformableConvBlock(nn.Module):
-    """Deformable convolution block with proper offset generation"""
-    def __init__(self, in_channels: int, out_channels: int, kernel_size: int = 3, 
-                 stride: int = 1, padding: int = 1, groups: int = 1):
-        super().__init__()
-        
-        # Offset convolution - generates 2 * kernel_size^2 * groups offsets
-        self.offset_conv = nn.Conv2d(
-            in_channels, 
-            2 * kernel_size * kernel_size * groups,
-            kernel_size=kernel_size,
-            stride=stride,
-            padding=padding,
-            bias=True
-        )
-        
-        # Deformable convolution
-        self.deform_conv = DeformConv2d(
-            in_channels,
-            out_channels,
-            kernel_size=kernel_size,
-            stride=stride,
-            padding=padding,
-            groups=groups,
-            bias=False
-        )
-        
-        # Initialize offset conv to zero (important for stable training)
-        nn.init.constant_(self.offset_conv.weight, 0.0)
-        nn.init.constant_(self.offset_conv.bias, 0.0)
-    
-    def forward(self, x):
-        # Generate offsets
-        offset = self.offset_conv(x)
-        
-        # Apply deformable convolution
-        return self.deform_conv(x, offset)
 
 
 class FPN(nn.Module):
     """
     Enhanced FPN with integrated attention mechanisms for Braille detection
     """
-    def __init__(self, num_classes=26, use_coord: bool = False, use_cbam: bool = True, use_deform: bool = False):
+    def __init__(self, num_classes=26, use_coord: bool = False, use_cbam: bool = True, use_pos: bool = True):
         super().__init__()
         
         from BackBone import BackBone
@@ -60,7 +20,7 @@ class FPN(nn.Module):
         self.num_classes = num_classes
         self.use_coord = use_coord
         self.use_cbam = use_cbam
-        self.use_deform = use_deform
+        self.use_pos = use_pos  # positional attention
         
         self.strides = [2, 4, 8, 16, 32]
         self.scales = nn.Parameter(torch.tensor([16.,32.,64.,128.,256.]))
@@ -119,6 +79,11 @@ class FPN(nn.Module):
                     )
                 )
         
+        # Position-aware attention modules for detection heads
+        if self.use_pos:
+            self.pos_attention_cls = PositionAwareAttention(fpn_channels, reduction=16)
+            self.pos_attention_reg = PositionAwareAttention(fpn_channels, reduction=16)
+        
         # Spatial attention branches for loss computation
         self.spatial_attention = nn.ModuleList()
         for _ in range(len(self.strides)):
@@ -130,9 +95,9 @@ class FPN(nn.Module):
                 )
             )
         
-        # Enhanced detection heads with optional deformable convolutions
-        self.classification_head = self._make_head(fpn_channels, 128, use_deform=self.use_deform)
-        self.regression_head = self._make_head(fpn_channels, 128, use_deform=self.use_deform)
+        # Enhanced detection heads
+        self.classification_head = self._make_head(fpn_channels, 128)
+        self.regression_head = self._make_head(fpn_channels, 128)
         
         # Output layers
         self.classification_to_class = nn.Conv2d(128, self.num_classes, 3, padding=1)
@@ -149,12 +114,12 @@ class FPN(nn.Module):
         print(f"FPN Configuration:")
         print(f"  - Coordinate Attention: {'Enabled' if self.use_coord else 'Disabled'}")
         print(f"  - CBAM Attention: {'Enabled' if self.use_cbam else 'Disabled'}")
-        print(f"  - Deformable Convolution: {'Enabled' if self.use_deform else 'Disabled'}")
+        print(f"  - Position-Aware Attention: {'Enabled' if self.use_pos else 'Disabled'}")
+        print(f"  - Deformable Convolution: Disabled (Removed)")
         print(f"  - Number of Classes: {self.num_classes}")
     
-    def _make_head(self, in_channels: int, out_channels: int, 
-                   use_deform: bool = False) -> nn.Module:
-        """Create detection head with optional deformable convolution"""
+    def _make_head(self, in_channels: int, out_channels: int) -> nn.Module:
+        """Create detection head with regular convolutions only"""
         layers = []
         
         # First layer
@@ -164,19 +129,12 @@ class FPN(nn.Module):
             nn.ReLU(inplace=True)
         ])
         
-        # Second layer (with optional deformable convolution)
-        if use_deform:
-            layers.append(DeformableConvBlock(in_channels, in_channels, 3, 1, 1))
-            layers.extend([
-                nn.GroupNorm(32, in_channels),
-                nn.ReLU(inplace=True)
-            ])
-        else:
-            layers.extend([
-                nn.Conv2d(in_channels, in_channels, 3, padding=1),
-                nn.GroupNorm(32, in_channels),
-                nn.ReLU(inplace=True)
-            ])
+        # Second layer (regular convolution)
+        layers.extend([
+            nn.Conv2d(in_channels, in_channels, 3, padding=1),
+            nn.GroupNorm(32, in_channels),
+            nn.ReLU(inplace=True)
+        ])
         
         # Third layer
         layers.extend([
@@ -184,7 +142,7 @@ class FPN(nn.Module):
             nn.GroupNorm(min(32, out_channels // 4), out_channels),
             nn.ReLU(inplace=True)
         ])
-        
+            
         return nn.Sequential(*layers)
     
     def _initialize_weights(self):
@@ -248,17 +206,25 @@ class FPN(nn.Module):
             att_map = self.spatial_attention[i](fused)
             attention_maps.append(att_map)
         
-        # Detection heads (already handle deformable convolution based on use_deform flag)
+        # Detection heads with optional position-aware attention
         classes_by_feature = []
         regression_by_feature = []
         
         for scale, feat in zip(self.scales, fused_features):
+            # Apply position-aware attention if enabled
+            if self.use_pos:
+                cls_feat_enhanced = self.pos_attention_cls(feat)
+                reg_feat_enhanced = self.pos_attention_reg(feat)
+            else:
+                cls_feat_enhanced = feat
+                reg_feat_enhanced = feat
+            
             # Classification
-            cls_feat = self.classification_head(feat)
+            cls_feat = self.classification_head(cls_feat_enhanced)
             classes = self.classification_to_class(cls_feat)
             
             # Regression
-            reg_feat = self.regression_head(feat)
+            reg_feat = self.regression_head(reg_feat_enhanced)
             bbox_pred = torch.exp(self.regression_to_bbox(reg_feat)) * scale
             
             # Reshape outputs

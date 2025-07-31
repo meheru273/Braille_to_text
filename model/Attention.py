@@ -49,23 +49,7 @@ class CBAM(nn.Module):
         y = self.spatial_attention(x)
         return y
 
-class SE_Attention(nn.Module):
-    def __init__(self, in_channels, reduction=16):
-        super(SE_Attention, self).__init__()
-        self.avg_pool = nn.AdaptiveAvgPool2d(1)
-        self.fc = nn.Sequential(
-            nn.Conv2d(in_channels, in_channels // reduction, 1, bias=False),
-            nn.ReLU(inplace=True),
-            nn.Conv2d(in_channels // reduction*2, in_channels, 1, bias=False),
-            nn.ReLU(inplace=True),
-            nn.Conv2d(in_channels // reduction, in_channels, 1, bias=False),
-            nn.Sigmoid()
-        )
-    
-    def forward(self, x):
-        se = self.avg_pool(x)
-        se = self.fc(se)
-        return x * se
+
     
 class CoordinateAttention(nn.Module):
     def __init__(self, channels, reduction=32):
@@ -99,3 +83,38 @@ class CoordinateAttention(nn.Module):
         x = x * att_w
         
         return x
+
+class PositionAwareAttention(nn.Module):
+    """Lightweight position-aware attention without anchors"""
+    def __init__(self, channels, reduction=16):
+        super().__init__()
+        self.channels = channels
+        
+        # Position encoding generators
+        self.pos_h = nn.Parameter(torch.randn(1, channels // 2, 1, 1))
+        self.pos_w = nn.Parameter(torch.randn(1, channels // 2, 1, 1))
+        
+        # Feature transformation
+        self.transform = nn.Sequential(
+            nn.Conv2d(channels, channels // reduction, 1, bias=False),
+            nn.BatchNorm2d(channels // reduction),
+            nn.ReLU(inplace=True),
+            nn.Conv2d(channels // reduction, channels, 1, bias=False),
+            nn.Sigmoid()
+        )
+
+    def forward(self, x):
+        b, c, h, w = x.size()
+        
+        # Generate position encodings
+        pos_h = self.pos_h.expand(b, c // 2, h, 1).expand(b, c // 2, h, w)
+        pos_w = self.pos_w.expand(b, c // 2, 1, w).expand(b, c // 2, h, w)
+        pos_encoding = torch.cat([pos_h, pos_w], dim=1)
+        
+        # Add position information to features
+        enhanced_features = x + pos_encoding
+        
+        # Generate attention weights
+        attention = self.transform(enhanced_features)
+        
+        return x * attention

@@ -73,18 +73,14 @@ class CenterAttentionLoss(nn.Module):
         self.sigma = sigma
         self.weight = weight
     
-    def generate_center_heatmap(self, box_targets: torch.Tensor, 
-                               class_targets: torch.Tensor,
-                               size: Tuple[int, int]) -> torch.Tensor:
+    def generate_center_heatmap(self, box_targets: torch.Tensor, class_targets: torch.Tensor, size: Tuple[int, int]) -> torch.Tensor:
         """Generate Gaussian heatmap centered at object centers"""
         B, H, W = class_targets.shape
         device = class_targets.device
-        
         # Create coordinate grids
         y_coords = torch.arange(H, device=device).float()
         x_coords = torch.arange(W, device=device).float()
         y_grid, x_grid = torch.meshgrid(y_coords, x_coords, indexing='ij')
-        
         heatmap = torch.zeros(B, H, W, device=device)
         
         for b in range(B):
@@ -97,10 +93,13 @@ class CenterAttentionLoss(nn.Module):
             obj_indices = torch.where(obj_mask)
             for i in range(len(obj_indices[0])):
                 y, x = obj_indices[0][i], obj_indices[1][i]
-                
-                # Box center (box_targets are in format [cx, cy, w, h])
-                cx = box_targets[b, y, x, 0]
-                cy = box_targets[b, y, x, 1]
+                # CORRECT: Convert left/top/right/bottom to cx/cy
+                left = box_targets[b, y, x, 0] * stride  # Denormalize
+                top = box_targets[b, y, x, 1] * stride
+                right = box_targets[b, y, x, 2] * stride
+                bottom = box_targets[b, y, x, 3] * stride
+                cx = (left + right) / 2
+                cy = (top + bottom) / 2
                 
                 # Generate Gaussian centered at (cx, cy)
                 gaussian = torch.exp(-((x_grid - cx)**2 + (y_grid - cy)**2) / (2 * self.sigma**2))
