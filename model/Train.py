@@ -18,7 +18,8 @@ from FPNAttention import (
     ImprovedFPN, compute_loss_with_attention, 
     SpatialAttentionLoss, CenterAttentionLoss
 )
-from FPN import normalize_batch, FocalLoss
+from FPNAttention import normalize_batch
+from loss import FocalLoss
 
 logger = logging.getLogger(__name__)
 
@@ -152,10 +153,7 @@ def train(train_dir: pathlib.Path,
     if use_improved_model:
         print("Creating improved model with attention...")
         model = ImprovedFPN(num_classes=num_classes,use_coord=False,use_cbam=True,use_deform=False)   
-    else:
-        from FPN import FPN
-        print("Creating standard model...")
-        model = FPN(num_classes=num_classes)
+    
     
     model.to(device)
     

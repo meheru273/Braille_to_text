@@ -7,7 +7,7 @@ import numpy as np
 import torch
 import torchvision
 
-from FPN import FPN, normalize_batch
+from FPNAttention import FPN, normalize_batch
 
 MIN_SCORE = 0.001
 DEFAULT_MAX_DETECTIONS = 3000
