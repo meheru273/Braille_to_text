@@ -13,10 +13,10 @@ from pycocotools.coco import COCO
 import cv2
 
 from Train import COCOData, collate_fn
-from FPN import FPN, normalize_batch
+from FPNAttention import FPN, normalize_batch
 from inference import detections_from_network_output, render_detections_to_image, tensor_to_image
 
-from FPNAttention import ImprovedFPN
+from FPNAttention import FPN
 # Set up logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -145,9 +145,9 @@ def compute_detections(model, test_loader, device, class_names, image_size, conf
             images = images.to(device)
             batch_norm = normalize_batch(images)
             
-            # Forward pass - handle both standard FPN and ImprovedFPN
+            # Forward pass - handle both standard FPN and FPN
             try:
-                # Try ImprovedFPN first (returns 3 values)
+                # Try FPN first (returns 3 values)
                 cls_pred, box_pred, att_map = model(batch_norm)
             except ValueError:
                 # Fallback to standard FPN (returns 2 values)
@@ -352,8 +352,8 @@ def evaluate_model(test_dir: pathlib.Path, model_path: pathlib.Path, confidence_
     logger.info(f"Creating model with {model_num_classes} classes...")
     try:
         if use_improved_model:
-            model = ImprovedFPN(num_classes=model_num_classes, use_coord=False, use_cbam=True, use_deform=False)
-            print(" Created ImprovedFPN model")
+            model = FPN(num_classes=model_num_classes, use_coord=False, use_cbam=True, use_deform=False)
+            print(" Created FPN model")
         else:
             model = FPN(num_classes=model_num_classes)
             print(" Created standard FPN model")
@@ -507,9 +507,9 @@ def compute_detections(model, test_loader, device, class_names, image_size, conf
             images = images.to(device)
             batch_norm = normalize_batch(images)
             
-            # Forward pass - handle both standard FPN and ImprovedFPN
+            # Forward pass - handle both standard FPN and FPN
             try:
-                # Try ImprovedFPN first (returns 3 values)
+                # Try FPN first (returns 3 values)
                 cls_pred, box_pred, att_map = model(batch_norm)
             except ValueError:
                 # Fallback to standard FPN (returns 2 values)

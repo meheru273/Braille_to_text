@@ -21,7 +21,7 @@ if sys.platform.startswith('win'):
 # Import your existing modules
 from Dataset import COCOData, collate_fn
 from FPN import FPN, normalize_batch
-from FPNAttention import ImprovedFPN
+from FPNAttention import FPN
 from inference import detections_from_network_output
 
 
@@ -336,13 +336,13 @@ def load_model(model_path: str, num_classes: int, device: torch.device) -> torch
     if config:
         print(f"Found saved configuration: {config}")
         # Use saved configuration
-        model = ImprovedFPN(
+        model = FPN(
             num_classes=num_classes,
             use_coord=config.get('use_coord', False),
             use_cbam=config.get('use_cbam', False),
             use_deform=config.get('use_deform', False)
         )
-        print(f"Created ImprovedFPN with saved config: coord={config.get('use_coord')}, cbam={config.get('use_cbam')}, deform={config.get('use_deform')}")
+        print(f"Created FPN with saved config: coord={config.get('use_coord')}, cbam={config.get('use_cbam')}, deform={config.get('use_deform')}")
     else:
         # Fallback to auto-detection with improved logic
         state_dict_keys = list(state_dict.keys())
@@ -355,13 +355,13 @@ def load_model(model_path: str, num_classes: int, device: torch.device) -> torch
         print(f"Auto-detected features: CBAM={has_cbam}, CoordAtt={has_coord}, FeatureFusion={has_feature_fusion}")
         
         if has_cbam or has_coord or has_feature_fusion:
-            model = ImprovedFPN(
+            model = FPN(
                 num_classes=num_classes,
                 use_coord=has_coord,
                 use_cbam=has_cbam,
                 use_deform=False
             )
-            print(f"Created ImprovedFPN with auto-detection: coord={has_coord}, cbam={has_cbam}")
+            print(f"Created FPN with auto-detection: coord={has_coord}, cbam={has_cbam}")
         else:
             # Fallback to baseline FPN
             from FPN import FPN

@@ -15,7 +15,7 @@ from Targets import generate_targets
 from loss import _compute_loss
 from Dataset import collate_fn, COCOData
 from FPNAttention import (
-    ImprovedFPN, compute_loss_with_attention, 
+    FPN, compute_loss_with_attention, 
     SpatialAttentionLoss, CenterAttentionLoss
 )
 from FPNAttention import normalize_batch
@@ -152,7 +152,7 @@ def train(train_dir: pathlib.Path,
     # Create model
     if use_improved_model:
         print("Creating improved model with attention...")
-        model = ImprovedFPN(num_classes=num_classes,use_coord=False,use_cbam=True,use_deform=False)   
+        model = FPN(num_classes=num_classes,use_coord=False,use_cbam=True,use_deform=False)   
     
     
     model.to(device)

@@ -146,7 +146,7 @@ class FPN(nn.Module):
     
     def _print_config(self):
         """Print the configuration of attention mechanisms"""
-        print(f"ImprovedFPN Configuration:")
+        print(f"FPN Configuration:")
         print(f"  - Coordinate Attention: {'Enabled' if self.use_coord else 'Disabled'}")
         print(f"  - CBAM Attention: {'Enabled' if self.use_cbam else 'Disabled'}")
         print(f"  - Deformable Convolution: {'Enabled' if self.use_deform else 'Disabled'}")
