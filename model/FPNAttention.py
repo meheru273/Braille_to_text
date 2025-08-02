@@ -161,9 +161,10 @@ class FPN(nn.Module):
                 nn.init.constant_(m.bias, 0)
         
         # Initialize classification head with focal loss prior
-        prior_prob = 0.01
-        bias_value = -math.log((1 - prior_prob) / prior_prob)
-        nn.init.constant_(self.classification_to_class.bias, bias_value)
+        
+        prior_prob = 0.1  # Encourages reasonable initial predictions
+        bias_value = math.log((1 - prior_prob) / prior_prob)
+        nn.init.constant_(self.regression_to_bbox.bias, bias_value)
         
         # Initialize regression head
         nn.init.normal_(self.regression_to_bbox.weight, std=0.01)
@@ -221,7 +222,7 @@ class FPN(nn.Module):
             
             # Regression (position attention is now integrated in the head)
             reg_feat = self.regression_head(feat)
-            bbox_pred = torch.exp(self.regression_to_bbox(reg_feat)) 
+            bbox_pred = self.regression_to_bbox(reg_feat)
             
             # Reshape outputs
             classes = classes.permute(0, 2, 3, 1).contiguous()

@@ -92,12 +92,10 @@ def _boxes_from_regression(reg, img_height, img_width, stride):
     center_y = center_y.unsqueeze(0).expand(batch, -1, -1)
     center_x = center_x.unsqueeze(0).expand(batch, -1, -1)
 
-    # CRITICAL FIX: Apply exp to convert regression to distances
-    # Then multiply by stride for scale normalization
-    left_dist = torch.exp(reg[..., 0]) * stride
-    top_dist = torch.exp(reg[..., 1]) * stride  
-    right_dist = torch.exp(reg[..., 2]) * stride
-    bottom_dist = torch.exp(reg[..., 3]) * stride
+    left_dist = reg[..., 0] * stride  # ✅ CORRECTED
+    top_dist = reg[..., 1] * stride   # ✅ CORRECTED
+    right_dist = reg[..., 2] * stride  # ✅ CORRECTED
+    bottom_dist = reg[..., 3] * stride 
 
     # Convert to absolute coordinates
     x_min = center_x - left_dist

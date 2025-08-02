@@ -236,20 +236,6 @@ def train(train_dir: pathlib.Path,
                     x.shape, class_labels, box_labels, model.strides
                 )
                 
-                # In your training loop, after generate_targets():
-                def debug_target_model_consistency(box_targets, model_output, level_idx=0):
-                    """Verify targets and model outputs are in compatible ranges"""
-                    if len(box_targets) > level_idx and len(model_output) > level_idx:
-                        target_sample = box_targets[level_idx][0, 0, 0, :]  # First valid target
-                        model_sample = model_output[level_idx][0, 0, 0, :]  # Corresponding model output
-                        
-                        print(f"Level {level_idx}:")
-                        print(f"  Target range: {target_sample.min():.3f} to {target_sample.max():.3f}")
-                        print(f"  Model output range: {model_sample.min():.3f} to {model_sample.max():.3f}")
-                        print(f"  exp(Model) range: {torch.exp(model_sample).min():.3f} to {torch.exp(model_sample).max():.3f}")
-
-                # Use in training loop:
-                debug_target_model_consistency(box_t, box_pred)
                 
                 # Compute loss with attention
                 if use_improved_model:
