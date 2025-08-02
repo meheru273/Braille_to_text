@@ -92,8 +92,19 @@ def get_predictions(model, dataloader, device, conf_threshold=0.5):
                                 'class_id': int(cls_id),
                                 'bbox': bbox.astype(float)
                             })
-    
-    return predictions, ground_truths
+                            
+            # In get_predictions_from_model_with_analysis, after getting predictions
+            sample_pred = predictions[0] if predictions else None
+            if sample_pred:
+                print("\nDEBUG: Sample prediction analysis")
+                print(f"Image ID: {sample_pred['image_id']}")
+                print(f"Class ID: {sample_pred['class_id']}")
+                print(f"Confidence: {sample_pred['score']:.4f}")
+                print(f"Bounding box: {sample_pred['bbox']}")
+                print(f"Box width: {sample_pred['bbox'][2]-sample_pred['bbox'][0]:.2f} pixels")
+                print(f"Box height: {sample_pred['bbox'][3]-sample_pred['bbox'][1]:.2f} pixels")
+                
+                return predictions, ground_truths
 
 
 def calculate_metrics(predictions, ground_truths, num_classes, iou_threshold=0.5):

@@ -1,9 +1,7 @@
 import torch 
 import torch.nn.functional as F
 import math
-import torch
 import torch.nn as nn
-import math
 from typing import List, Tuple, Optional
 import numpy as np
 
@@ -94,16 +92,18 @@ class CenterAttentionLoss(nn.Module):
             obj_indices = torch.where(obj_mask)
             for i in range(len(obj_indices[0])):
                 y, x = obj_indices[0][i], obj_indices[1][i]
-                # CORRECT: Convert left/top/right/bottom to cx/cy using provided stride
-                left = box_targets[b, y, x, 0] * stride
-                top = box_targets[b, y, x, 1] * stride
-                right = box_targets[b, y, x, 2] * stride
-                bottom = box_targets[b, y, x, 3] * stride
-                cx = (left + right) / 2
-                cy = (top + bottom) / 2
+                # FIXED: Convert distances to center coordinates
+                left_dist = box_targets[b, y, x, 0] * stride
+                top_dist = box_targets[b, y, x, 1] * stride
+                right_dist = box_targets[b, y, x, 2] * stride
+                bottom_dist = box_targets[b, y, x, 3] * stride
                 
-                # Generate Gaussian centered at (cx, cy)
-                gaussian = torch.exp(-((x_grid - cx)**2 + (y_grid - cy)**2) / (2 * self.sigma**2))
+                # Calculate center in feature map coordinates
+                center_x_feat = x
+                center_y_feat = y
+                
+                # Generate Gaussian centered at feature location
+                gaussian = torch.exp(-((x_grid - center_x_feat)**2 + (y_grid - center_y_feat)**2) / (2 * self.sigma**2))
                 heatmap[b] = torch.maximum(heatmap[b], gaussian)
         
         return heatmap
@@ -111,14 +111,14 @@ class CenterAttentionLoss(nn.Module):
     def forward(self, attention_maps: List[torch.Tensor],
                 class_targets: List[torch.Tensor],
                 box_targets: List[torch.Tensor],
-                strides: List[int]) -> torch.Tensor:  # ADD STRIDES PARAMETER
+                strides: List[int]) -> torch.Tensor:
         """Compute center attention loss"""
         total_loss = 0.0
         valid_levels = 0
         
         for level_idx, (att_map, cls_t, box_t) in enumerate(zip(attention_maps, class_targets, box_targets)):
             B, _, H, W = att_map.shape
-            stride = strides[level_idx]  # GET STRIDE FOR THIS LEVEL
+            stride = strides[level_idx]
             
             # Generate center heatmap using the correct stride
             center_heatmap = self.generate_center_heatmap(box_t, cls_t, (H, W), stride)
@@ -141,11 +141,9 @@ class CenterAttentionLoss(nn.Module):
 
 class FocalLoss(nn.Module):
     """
-    Focal Loss for addressing class imbalance in multi-class classification.
-    Supports manual alpha weights or automatic inverse-frequency weighting.
+    PROPERLY FIXED Focal Loss - normalizes by positive samples to prevent background dominance
     """
-    def __init__(self, alpha=None, gamma=2.0,num_classes=26, reduction='mean'):
-       
+    def __init__(self, alpha=None, gamma=2.0, num_classes=26, reduction='positive_normalized'):
         super().__init__()
         self.gamma = gamma
         self.reduction = reduction
@@ -157,12 +155,11 @@ class FocalLoss(nn.Module):
         elif alpha == "auto":
             if num_classes is None:
                 raise ValueError("num_classes must be provided for auto alpha calculation")
-            self.alpha = "auto"  # Placeholder for deferred calculation
+            self.alpha = "auto"
         else:
-            self.alpha = alpha  # Scalar or None
+            self.alpha = alpha
 
     def forward(self, inputs, targets):
-        
         # Flatten inputs and targets for cross_entropy
         ce_loss = F.cross_entropy(inputs, targets, reduction='none')
         pt = torch.exp(-ce_loss)  # Probability of true class
@@ -174,15 +171,40 @@ class FocalLoss(nn.Module):
         if hasattr(self, 'alpha') and self.alpha is not None:
             if isinstance(self.alpha, torch.Tensor):
                 alpha_tensor = self.alpha.to(targets.device)
-                alpha_t = alpha_tensor[targets]  # Gather per-class weights
+                alpha_t = alpha_tensor[targets]
             else:
-                alpha_t = self.alpha  # Scalar alpha
+                alpha_t = self.alpha
             focal_weight *= alpha_t
         
         focal_loss = focal_weight * ce_loss
         
-        # Apply reduction
-        if self.reduction == 'mean':
+        # *** CRITICAL FIX: Normalize by positive samples ***
+        if self.reduction == 'positive_normalized':
+            pos_mask = targets > 0
+            neg_mask = targets == 0
+            
+            num_pos = pos_mask.sum().item()
+            num_neg = neg_mask.sum().item()
+            
+            if num_pos > 0:
+                # Positive loss (full weight)
+                pos_loss = focal_loss[pos_mask].sum()
+                
+                # Negative loss (controlled weight to prevent dominance)
+                if num_neg > 0:
+                    neg_loss = focal_loss[neg_mask].sum()
+                    # Limit negative contribution - key insight!
+                    neg_weight = min(1.0, num_pos / num_neg * 3.0)
+                    neg_loss = neg_loss * neg_weight
+                else:
+                    neg_loss = 0.0
+                
+                # Normalize by positive samples
+                return (pos_loss + neg_loss) / num_pos
+            else:
+                # Fallback if no positive samples
+                return focal_loss.mean()
+        elif self.reduction == 'mean':
             return focal_loss.mean()
         elif self.reduction == 'sum':
             return focal_loss.sum()
@@ -195,27 +217,23 @@ class FocalLoss(nn.Module):
         total_samples = 0
     
         for *_, labels in dataset:
-            # Flatten labels and convert to integers
-            labels = labels.view(-1).long()  # Flattens and ensures 1D
-            # Filter out invalid indices (e.g., ignore background class if needed)
+            labels = labels.view(-1).long()
             valid_labels = labels[(labels >= 0) & (labels < num_classes)]
             class_counts += torch.bincount(valid_labels, minlength=num_classes)
             total_samples += len(valid_labels)
 
-        # Compute weights (same as before)
         class_weights = total_samples / (num_classes * (class_counts + 1e-6))
         class_weights = torch.log(class_weights + 1.0)
         class_weights = torch.clamp(class_weights, min=0.1, max=3.0)
         self.alpha = class_weights
         print(f"Auto-calculated alpha weights: {self.alpha}")
-        
-    
+
 def _compute_loss(
     classes, boxes, class_targets, box_targets,
     focal_loss_fn, classification_weight=2.0, regression_weight=2.0,
-     box_labels_by_batch=None, img_shape=None, strides=None,
+    box_labels_by_batch=None, img_shape=None, strides=None,
 ):
-    """Fixed loss computation with proper tensor dimension handling"""
+    """SIMPLIFIED and CORRECTED loss computation"""
 
     device = classes[0].device
     num_classes = classes[0].shape[-1]
@@ -231,7 +249,7 @@ def _compute_loss(
         cls_t = class_targets[idx].to(device)  # [B, H_target, W_target]
         box_t = box_targets[idx].to(device)   # [B, H_target, W_target, 4]
 
-        # ✅ CRITICAL: Ensure matching dimensions
+        # Ensure matching dimensions
         B, H_pred, W_pred = cls_p.shape[:3]
         
         if len(cls_t.shape) == 3:  # [B, H_target, W_target]
@@ -242,51 +260,41 @@ def _compute_loss(
 
         # Resize targets to match predictions if needed
         if (H_pred, W_pred) != (H_target, W_target):
-            
-            # Resize class targets
             cls_t = F.interpolate(cls_t.float().unsqueeze(1), size=(H_pred, W_pred),
                                   mode='nearest').squeeze(1).long()
             
-            # Resize box targets
             if len(box_t.shape) == 4:  # [B, H, W, 4]
                 box_t = F.interpolate(box_t.permute(0, 3, 1, 2), size=(H_pred, W_pred),
                                       mode='bilinear', align_corners=False).permute(0, 2, 3, 1)
-
 
         cls_p_flat = cls_p.view(-1, num_classes).float()  # [B*H*W, num_classes]
         cls_t_flat = cls_t.view(-1).long()                # [B*H*W]
         box_p_flat = box_p.view(-1, 4).float()           # [B*H*W, 4]
         box_t_flat = box_t.view(-1, 4).float()           # [B*H*W, 4]
 
-
-        # ✅ Ensure batch sizes match
         if cls_p_flat.shape[0] != cls_t_flat.shape[0]:
             print(f"ERROR: Batch size mismatch at level {idx}")
-            print(f"Predictions: {cls_p_flat.shape}, Targets: {cls_t_flat.shape}")
             continue
 
         pos_mask = cls_t_flat > 0
-
-        pos_mask = cls_t_flat > 0
-        num_positives = max(pos_mask.sum().item(), 1)  # Critical: count positive samples
-    
-        # CORRECTED CLASSIFICATION LOSS - normalize by positive samples
+        num_positives = pos_mask.sum().item()
+        
+        # *** FIXED: Use the corrected focal loss with positive normalization ***
         cls_loss = focal_loss_fn(cls_p_flat, cls_t_flat)
-        # Normalize by number of positive samples to prevent background domination
-        cls_loss = (cls_loss * pos_mask).sum() / num_positives
         classification_losses.append(cls_loss)
 
         # Regression loss (only on positive samples)
-        if pos_mask.sum() > 0:
+        if num_positives > 0:
             reg_loss = box_loss_fn(box_p_flat[pos_mask], box_t_flat[pos_mask]).mean()
             regression_losses.append(reg_loss)
+        else:
+            regression_losses.append(torch.tensor(0.0, device=device, requires_grad=True))
 
     # Compute final losses
     total_cls_loss = torch.stack(classification_losses).mean() if classification_losses else torch.tensor(0.0, device=device)
     total_reg_loss = torch.stack(regression_losses).mean() if regression_losses else torch.tensor(0.0, device=device)
     
-    
     total_loss = (classification_weight * total_cls_loss +
-                  regression_weight * total_reg_loss )
+                  regression_weight * total_reg_loss)
 
     return total_loss, total_cls_loss, total_reg_loss
