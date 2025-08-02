@@ -86,8 +86,8 @@ def _boxes_from_regression(reg, img_height, img_width, stride):
     batch, rows, cols, _ = reg.shape
 
     # Create anchor points (centers of grid cells)
-    y = torch.linspace(stride // 2, img_height - stride // 2, rows).to(reg.device)
-    x = torch.linspace(stride // 2, img_width - stride // 2, cols).to(reg.device)
+    y = torch.linspace(0, img_height - stride, rows).to(reg.device)
+    x = torch.linspace(0, img_width - stride, cols).to(reg.device)
     center_y, center_x = torch.meshgrid(y, x, indexing='ij')
     center_y = center_y.unsqueeze(0).expand(batch, -1, -1)
     center_x = center_x.unsqueeze(0).expand(batch, -1, -1)
@@ -95,7 +95,7 @@ def _boxes_from_regression(reg, img_height, img_width, stride):
     left_dist = reg[..., 0] * stride  # ✅ CORRECTED
     top_dist = reg[..., 1] * stride   # ✅ CORRECTED
     right_dist = reg[..., 2] * stride  # ✅ CORRECTED
-    bottom_dist = reg[..., 3] * stride 
+    bottom_dist = reg[..., 3] * stride  # ✅ CORRECTED
 
     # Convert to absolute coordinates
     x_min = center_x - left_dist
