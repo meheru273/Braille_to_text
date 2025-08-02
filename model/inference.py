@@ -55,57 +55,49 @@ def compute_detections(model: FPN, img: np.ndarray, device) -> List[Detection]:
     # returns List[List[Detection]]; since batch size=1, you can return detections[0]
     return detections[0]
 
-def detections_from_network_output(
-    img_height, img_width, classes, boxes, scales, strides
-) -> List[List[Detection]]:
-    """
-    FIXED VERSION: Single function with proper box decoding and score handling
-    """
+# In inference.py, modify detections_from_network_output:
+def detections_from_network_output(img_height, img_width, classes, boxes, scales, strides):
+    """Fixed version with consistent sigmoid handling"""
     all_classes = []
     all_boxes = []
     n_classes = classes[0].shape[-1]
     batch_size = classes[0].shape[0]
 
-    for feat_classes, feat_boxes, scale, stride in zip(
-        classes, boxes, scales, strides
-    ):
-        # CRITICAL FIX: Apply sigmoid to convert logits to probabilities for inference
-        # But keep logits for training (focal loss expects logits)
-        feat_classes_sigmoid = torch.sigmoid(feat_classes)
+    for feat_classes, feat_boxes, scale, stride in zip(classes, boxes, scales, strides):
+        # Apply sigmoid to classification (convert logits to probabilities)
+        feat_classes_probs = torch.sigmoid(feat_classes)
         
-        # FIXED: Proper box decoding without double scaling
-        boxes_decoded = _boxes_from_regression_fixed(
-            feat_boxes, img_height, img_width, stride  # Remove scale parameter
+        # Decode boxes with proper scaling
+        boxes_decoded = _boxes_from_regression(
+            feat_boxes, img_height, img_width, stride
         )
 
-        all_classes.append(feat_classes_sigmoid.view(batch_size, -1, n_classes))
+        all_classes.append(feat_classes_probs.view(batch_size, -1, n_classes))
         all_boxes.append(boxes_decoded.view(batch_size, -1, 4))
 
     classes_ = torch.cat(all_classes, dim=1)
     boxes_ = torch.cat(all_boxes, dim=1)
-
     gathered_boxes, gathered_classes, gathered_scores = _gather_detections(classes_, boxes_)
     return detections_from_net(gathered_boxes, gathered_classes, gathered_scores)
 
-def _boxes_from_regression_fixed(reg, img_height, img_width, stride):
-    """
-    CORRECTED: Proper box decoding with stride denormalization
-    """
+# In inference.py, replace _boxes_from_regression function:
+def _boxes_from_regression(reg, img_height, img_width, stride):
+    """CORRECTED: Proper FCOS box decoding"""
     batch, rows, cols, _ = reg.shape
 
-    # Proper anchor positioning - centers of grid cells
+    # Create anchor points (centers of grid cells)
     y = torch.linspace(stride // 2, img_height - stride // 2, rows).to(reg.device)
     x = torch.linspace(stride // 2, img_width - stride // 2, cols).to(reg.device)
-
     center_y, center_x = torch.meshgrid(y, x, indexing='ij')
     center_y = center_y.unsqueeze(0).expand(batch, -1, -1)
     center_x = center_x.unsqueeze(0).expand(batch, -1, -1)
 
-    # CORRECTED: Multiply by stride to denormalize
-    left_dist = reg[..., 0] * stride    # Now in pixels
-    top_dist = reg[..., 1] * stride     # Now in pixels
-    right_dist = reg[..., 2] * stride   # Now in pixels
-    bottom_dist = reg[..., 3] * stride  # Now in pixels
+    # CRITICAL FIX: Apply exp to convert regression to distances
+    # Then multiply by stride for scale normalization
+    left_dist = torch.exp(reg[..., 0]) * stride
+    top_dist = torch.exp(reg[..., 1]) * stride  
+    right_dist = torch.exp(reg[..., 2]) * stride
+    bottom_dist = torch.exp(reg[..., 3]) * stride
 
     # Convert to absolute coordinates
     x_min = center_x - left_dist

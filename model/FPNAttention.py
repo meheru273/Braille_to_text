@@ -221,7 +221,7 @@ class FPN(nn.Module):
             
             # Regression (position attention is now integrated in the head)
             reg_feat = self.regression_head(feat)
-            bbox_pred = torch.exp(self.regression_to_bbox(reg_feat)) * scale
+            bbox_pred = torch.exp(self.regression_to_bbox(reg_feat)) 
             
             # Reshape outputs
             classes = classes.permute(0, 2, 3, 1).contiguous()
