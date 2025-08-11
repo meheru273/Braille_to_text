@@ -82,20 +82,25 @@ def detections_from_network_output(img_height, img_width, classes, boxes, scales
 
 # In inference.py, replace _boxes_from_regression function:
 def _boxes_from_regression(reg, img_height, img_width, stride):
-    """CORRECTED: Proper FCOS box decoding"""
+    """
+    CORRECTED: Proper FCOS box decoding with tiny box prevention
+    """
     batch, rows, cols, _ = reg.shape
 
     # Create anchor points (centers of grid cells)
-    y = torch.linspace(0, img_height - stride, rows).to(reg.device)
-    x = torch.linspace(0, img_width - stride, cols).to(reg.device)
+    y = torch.linspace(stride/2, img_height - stride/2, rows).to(reg.device)
+    x = torch.linspace(stride/2, img_width - stride/2, cols).to(reg.device)
     center_y, center_x = torch.meshgrid(y, x, indexing='ij')
     center_y = center_y.unsqueeze(0).expand(batch, -1, -1)
     center_x = center_x.unsqueeze(0).expand(batch, -1, -1)
 
-    left_dist = reg[..., 0] * stride  # ✅ CORRECTED
-    top_dist = reg[..., 1] * stride   # ✅ CORRECTED
-    right_dist = reg[..., 2] * stride  # ✅ CORRECTED
-    bottom_dist = reg[..., 3] * stride  # ✅ CORRECTED
+    # FIXED: Apply bounds to prevent extreme values
+    reg_clamped = torch.clamp(reg, min=0.01, max=8.0)  # Reasonable bounds
+    
+    left_dist = reg_clamped[..., 0] * stride
+    top_dist = reg_clamped[..., 1] * stride
+    right_dist = reg_clamped[..., 2] * stride
+    bottom_dist = reg_clamped[..., 3] * stride
 
     # Convert to absolute coordinates
     x_min = center_x - left_dist
@@ -109,75 +114,24 @@ def _boxes_from_regression(reg, img_height, img_width, stride):
     x_max = torch.clamp(x_max, 0, img_width)
     y_max = torch.clamp(y_max, 0, img_height)
 
+    # CRITICAL FIX: Filter out tiny boxes
+    min_box_size = stride / 2  # Minimum reasonable box size
+    
+    widths = x_max - x_min
+    heights = y_max - y_min
+    
+    # Create mask for valid boxes
+    valid_mask = (widths >= min_box_size) & (heights >= min_box_size)
+    
+    # Zero out invalid boxes
+    x_min = torch.where(valid_mask, x_min, torch.zeros_like(x_min))
+    y_min = torch.where(valid_mask, y_min, torch.zeros_like(y_min))
+    x_max = torch.where(valid_mask, x_max, torch.zeros_like(x_max))
+    y_max = torch.where(valid_mask, y_max, torch.zeros_like(y_max))
+
     return torch.stack([x_min, y_min, x_max, y_max], dim=-1)
 
-def _gather_detections(classes, boxes, max_detections=DEFAULT_MAX_DETECTIONS):
-    """
-    FIXED: Improved detection gathering with better NMS
-    """
-    # Get class scores and indices
-    class_scores, class_indices = torch.max(classes, dim=2)
-    boxes_by_batch = []
-    classes_by_batch = []
-    scores_by_batch = []
 
-    n_batches = boxes.shape[0]
-    for i in range(n_batches):
-        class_scores_i = class_scores[i]
-        boxes_i = boxes[i]
-        class_indices_i = class_indices[i]
-
-        # FIXED: Filter by minimum score threshold
-        valid_mask = class_scores_i > MIN_SCORE
-        
-        if not valid_mask.any():
-            # No valid detections
-            boxes_by_batch.append(torch.empty(0, 4).to(boxes.device))
-            classes_by_batch.append(torch.empty(0).long().to(boxes.device))
-            scores_by_batch.append(torch.empty(0).to(boxes.device))
-            continue
-
-        class_scores_i = class_scores_i[valid_mask]
-        boxes_i = boxes_i[valid_mask]
-        class_indices_i = class_indices_i[valid_mask]
-
-        # Select top detections
-        num_detections = min(class_scores_i.shape[0], max_detections)
-        if num_detections > 0:
-            _, top_detection_indices = torch.topk(class_scores_i, num_detections, dim=0)
-
-            top_boxes_i = torch.index_select(boxes_i, 0, top_detection_indices)
-            top_classes_i = torch.index_select(class_indices_i, 0, top_detection_indices)
-            top_scores_i = torch.index_select(class_scores_i, 0, top_detection_indices)
-
-            # FIXED: Apply NMS with reasonable threshold
-            valid_boxes_mask = (top_boxes_i[:, 2] > top_boxes_i[:, 0]) & (top_boxes_i[:, 3] > top_boxes_i[:, 1])
-            if valid_boxes_mask.any():
-                top_boxes_i = top_boxes_i[valid_boxes_mask]
-                top_classes_i = top_classes_i[valid_boxes_mask]
-                top_scores_i = top_scores_i[valid_boxes_mask]
-                
-                # Apply NMS
-                if len(top_boxes_i) > 0:
-                    boxes_to_keep = torchvision.ops.nms(top_boxes_i, top_scores_i, 0.3)  # Increased NMS threshold
-                    top_boxes_i = top_boxes_i[boxes_to_keep]
-                    top_classes_i = top_classes_i[boxes_to_keep]
-                    top_scores_i = top_scores_i[boxes_to_keep]
-            else:
-                # No valid boxes
-                top_boxes_i = torch.empty(0, 4).to(boxes.device)
-                top_classes_i = torch.empty(0).long().to(boxes.device)
-                top_scores_i = torch.empty(0).to(boxes.device)
-        else:
-            top_boxes_i = torch.empty(0, 4).to(boxes.device)
-            top_classes_i = torch.empty(0).long().to(boxes.device)
-            top_scores_i = torch.empty(0).to(boxes.device)
-        
-        boxes_by_batch.append(top_boxes_i)
-        classes_by_batch.append(top_classes_i)
-        scores_by_batch.append(top_scores_i)
-
-    return boxes_by_batch, classes_by_batch, scores_by_batch
 
 def detections_from_net(boxes_by_batch, classes_by_batch, scores_by_batch=None) -> List[List[Detection]]:
     """Convert network outputs to Detection objects"""
@@ -221,3 +175,90 @@ def tensor_to_image(tensor: torch.Tensor) -> np.ndarray:
     
     img = np.clip(img, 0, 255).astype(np.uint8)
     return img
+
+def _gather_detections(classes, boxes, max_detections=3000, min_score=0.05):
+    """
+    IMPROVED: Better detection gathering with size filtering
+    """
+    class_scores, class_indices = torch.max(classes, dim=2)
+    boxes_by_batch = []
+    classes_by_batch = []
+    scores_by_batch = []
+
+    n_batches = boxes.shape[0]
+    for i in range(n_batches):
+        class_scores_i = class_scores[i]
+        boxes_i = boxes[i]
+        class_indices_i = class_indices[i]
+
+        # FIXED: Higher minimum score threshold
+        valid_mask = class_scores_i > min_score
+        
+        # ADDED: Size filtering for boxes
+        box_widths = boxes_i[:, 2] - boxes_i[:, 0]
+        box_heights = boxes_i[:, 3] - boxes_i[:, 1]
+        size_mask = (box_widths > 2) & (box_heights > 2)  # Filter tiny boxes
+        
+        final_mask = valid_mask & size_mask
+        
+        if not final_mask.any():
+            # No valid detections
+            boxes_by_batch.append(torch.empty(0, 4).to(boxes.device))
+            classes_by_batch.append(torch.empty(0).long().to(boxes.device))
+            scores_by_batch.append(torch.empty(0).to(boxes.device))
+            continue
+
+        class_scores_i = class_scores_i[final_mask]
+        boxes_i = boxes_i[final_mask]
+        class_indices_i = class_indices_i[final_mask]
+
+        # Select top detections
+        num_detections = min(class_scores_i.shape[0], max_detections)
+        if num_detections > 0:
+            _, top_detection_indices = torch.topk(class_scores_i, num_detections, dim=0)
+
+            top_boxes_i = torch.index_select(boxes_i, 0, top_detection_indices)
+            top_classes_i = torch.index_select(class_indices_i, 0, top_detection_indices)
+            top_scores_i = torch.index_select(class_scores_i, 0, top_detection_indices)
+
+            # Apply NMS with appropriate threshold for small objects
+            if len(top_boxes_i) > 0:
+                boxes_to_keep = torchvision.ops.nms(top_boxes_i, top_scores_i, 0.5)  # Higher threshold for small objects
+                top_boxes_i = top_boxes_i[boxes_to_keep]
+                top_classes_i = top_classes_i[boxes_to_keep] 
+                top_scores_i = top_scores_i[boxes_to_keep]
+        else:
+            top_boxes_i = torch.empty(0, 4).to(boxes.device)
+            top_classes_i = torch.empty(0).long().to(boxes.device)
+            top_scores_i = torch.empty(0).to(boxes.device)
+        
+        boxes_by_batch.append(top_boxes_i)
+        classes_by_batch.append(top_classes_i)
+        scores_by_batch.append(top_scores_i)
+
+    return boxes_by_batch, classes_by_batch, scores_by_batch
+
+
+# Debug function to monitor improvements
+def debug_regression_outputs(reg_outputs, stride, feature_level):
+    """Debug function to monitor regression output quality"""
+    reg_flat = reg_outputs.view(-1, 4)
+    
+    stats = {
+        'min_vals': reg_flat.min(dim=0)[0].cpu().numpy(),
+        'max_vals': reg_flat.max(dim=0)[0].cpu().numpy(), 
+        'mean_vals': reg_flat.mean(dim=0).cpu().numpy(),
+        'std_vals': reg_flat.std(dim=0).cpu().numpy()
+    }
+    
+    # Check for problematic values
+    tiny_boxes = (reg_flat < 0.01).any(dim=1).float().mean().item()
+    huge_boxes = (reg_flat > 8.0).any(dim=1).float().mean().item()
+    
+    print(f"\nFeature level {feature_level} (stride={stride}):")
+    print(f"  Regression stats: min={stats['min_vals']}, max={stats['max_vals']}")
+    print(f"  Mean: {stats['mean_vals']}, Std: {stats['std_vals']}")
+    print(f"  Tiny boxes ratio: {tiny_boxes:.4f}")
+    print(f"  Huge boxes ratio: {huge_boxes:.4f}")
+    
+    return stats

@@ -3,56 +3,34 @@ import torch
 import math
 
 
+import torch
+import math
+
 def generate_targets_adaptive(img_shape, class_labels_by_batch, box_labels_by_batch, strides, 
-                             size_ranges=None, center_sampling=True, center_radius=1.5):
+                                  size_ranges=None, center_sampling=True, center_radius=1.5):
     """
-    Improved target generation for small object detection (like Braille characters)
-    
-    Args:
-        img_shape: Shape of input images [B, C, H, W]
-        class_labels_by_batch: List of class labels per image
-        box_labels_by_batch: List of bounding boxes per image
-        strides: List of stride values for each FPN level
-        size_ranges: Custom size ranges for each level (auto-calculated if None)
-        center_sampling: Use center sampling strategy
-        center_radius: Radius for center sampling (in stride units)
+    FIXED target generation that prevents tiny box predictions
     """
     batch_size, _, img_h, img_w = img_shape
     
-    # Auto-calculate size ranges based on strides if not provided
+    # Define proper size ranges for Braille characters
     if size_ranges is None:
-        # For small objects like Braille, use stride-based ranges
-        size_ranges = []
-        for i, stride in enumerate(strides):
-            if i == 0:
-                min_size = 0
-                max_size = stride * 4
-            elif i == len(strides) - 1:
-                min_size = strides[i-1] * 4
-                max_size = float('inf')
-            else:
-                min_size = strides[i-1] * 4
-                max_size = stride * 4
-            size_ranges.append((min_size, max_size))
-    
+        size_ranges = [
+            (0, 24),      # stride=2: very small Braille dots
+            (12, 48),     # stride=4: small characters
+            (24, 96),     # stride=8: medium characters
+            (48, 192),    # stride=16: large characters
+            (96, 512)     # stride=32: very large characters
+        ]
     
     class_targets = []
     box_targets = []
     
-    # Pre-calculate feature map dimensions
-    feature_sizes = []
-    for stride in strides:
+    for level_idx, (stride, size_range) in enumerate(zip(strides, size_ranges)):
+        min_size, max_size = size_range
         feat_h = img_h // stride
         feat_w = img_w // stride
-        feature_sizes.append((feat_h, feat_w))
-    
-    # Statistics for debugging
-    level_assignments = [0] * len(strides)
-    
-    for level_idx, (stride, size_range, (feat_h, feat_w)) in enumerate(zip(strides, size_ranges, feature_sizes)):
-        min_size, max_size = size_range
         
-        # Initialize targets
         cls_target = torch.zeros((batch_size, feat_h, feat_w), dtype=torch.long)
         box_target = torch.zeros((batch_size, feat_h, feat_w, 4), dtype=torch.float32)
         
@@ -64,84 +42,93 @@ def generate_targets_adaptive(img_shape, class_labels_by_batch, box_labels_by_ba
                 x1, y1, x2, y2 = box
                 w, h = x2 - x1, y2 - y1
                 
-                # Use geometric mean for size (better for small objects)
+                # Use geometric mean for size assignment (better for small objects)
                 obj_size = math.sqrt(w * h)
                 
-                # Check size range
+                # Strict size filtering - only assign to appropriate levels
                 if not (min_size <= obj_size < max_size):
                     continue
-                
-                level_assignments[level_idx] += 1
                 
                 # Calculate object center
                 cx = (x1 + x2) / 2
                 cy = (y1 + y2) / 2
                 
                 if center_sampling:
-                    # Center sampling: only assign pixels near object center
-                    # This is especially important for small objects
+                    # Adaptive center sampling based on object size
                     cx_feat = cx / stride
                     cy_feat = cy / stride
                     
-                    # Define sampling region
-                    radius = center_radius
+                    # CRITICAL FIX: Limit sampling radius to prevent tiny boxes
+                    radius = min(center_radius, max(w, h) / stride * 0.3)  # Max 30% of object size
+                    radius = max(0.5, radius)  # Ensure minimum radius
+                    
                     x_min = int(max(0, cx_feat - radius))
                     x_max = int(min(feat_w - 1, cx_feat + radius)) + 1
                     y_min = int(max(0, cy_feat - radius))
                     y_max = int(min(feat_h - 1, cy_feat + radius)) + 1
                 else:
-                    # Original method: assign all pixels inside bbox
-                    x_min = max(0, int(x1 / stride))
-                    y_min = max(0, int(y1 / stride))
-                    x_max = min(feat_w, int(x2 / stride) + 1)
-                    y_max = min(feat_h, int(y2 / stride) + 1)
+                    # Conservative bbox assignment
+                    x_min = max(0, int((x1 + w * 0.25) / stride))  # Start 25% into box
+                    y_min = max(0, int((y1 + h * 0.25) / stride))
+                    x_max = min(feat_w, int((x2 - w * 0.25) / stride) + 1)  # End 25% before edge
+                    y_max = min(feat_h, int((y2 - h * 0.25) / stride) + 1)
                 
-                # Ensure we have at least one pixel
+                # Ensure at least one pixel assignment
                 if x_max <= x_min:
                     x_max = x_min + 1
                 if y_max <= y_min:
                     y_max = y_min + 1
                 
-                # Assign targets to feature map locations
+                # Assign targets with quality control
                 for feat_y in range(y_min, y_max):
                     for feat_x in range(x_min, x_max):
-                        # Feature map location center in image space
                         px = feat_x * stride + stride / 2
                         py = feat_y * stride + stride / 2
                         
-                        # Additional check: ensure pixel center is inside bbox
-                        if x1 <= px <= x2 and y1 <= py <= y2:
-                            # Calculate regression targets (distances to box edges)
-                            left = px - x1
-                            top = py - y1
-                            right = x2 - px
-                            bottom = y2 - py
+                        # Strict bounds checking
+                        if not (x1 <= px <= x2 and y1 <= py <= y2):
+                            continue
+                        
+                        # Calculate regression targets
+                        left = px - x1
+                        top = py - y1
+                        right = x2 - px
+                        bottom = y2 - py
+                        
+                        # CRITICAL: Quality control for regression targets
+                        min_distance = stride * 0.1  # Minimum 10% of stride
+                        max_distance = stride * 8.0  # Maximum 8x stride
+                        
+                        if (left >= min_distance and top >= min_distance and 
+                            right >= min_distance and bottom >= min_distance and
+                            left <= max_distance and top <= max_distance and
+                            right <= max_distance and bottom <= max_distance):
                             
-                            # All distances must be positive
-                            if left > 0 and top > 0 and right > 0 and bottom > 0:
-                                # Only update if this location isn't already assigned
-                                # or if current object is smaller (prioritize small objects)
-                                current_label = cls_target[batch_idx, feat_y, feat_x].item()
-                                if current_label == 0:
-                                    cls_target[batch_idx, feat_y, feat_x] = label
-                                    
-                                    # Normalize by stride for scale invariance
-                                    box_target[batch_idx, feat_y, feat_x] = torch.tensor([
-                                        left / stride,
-                                        top / stride,
-                                        right / stride,
-                                        bottom / stride
-                                    ], dtype=torch.float32)
+                            # Only assign if current location is empty or has larger object
+                            current_label = cls_target[batch_idx, feat_y, feat_x].item()
+                            current_size = float('inf')
+                            
+                            if current_label > 0:
+                                # Calculate current object size from existing targets
+                                curr_box = box_target[batch_idx, feat_y, feat_x]
+                                current_size = (curr_box[0] + curr_box[2]) * (curr_box[1] + curr_box[3])
+                            
+                            obj_reg_size = (left + right) * (top + bottom)
+                            
+                            # Prefer smaller objects (they're harder to detect)
+                            if current_label == 0 or obj_reg_size < current_size:
+                                cls_target[batch_idx, feat_y, feat_x] = label
+                                
+                                # FIXED: Proper normalization with bounds
+                                box_target[batch_idx, feat_y, feat_x] = torch.tensor([
+                                    left / stride,
+                                    top / stride,
+                                    right / stride,
+                                    bottom / stride
+                                ], dtype=torch.float32)
         
         class_targets.append(cls_target)
         box_targets.append(box_target)
-    
-    # Print assignment statistics
-    total_objects = sum(len(labels) for labels in class_labels_by_batch)
-    # print(f"Target assignment statistics:")
-    # print(f"  Total objects: {total_objects}")
-    # for i, count in enumerate(level_assignments):
-    #     print(f"  Level {i} (stride {strides[i]}): {count} objects")
     
     return class_targets, box_targets
 
