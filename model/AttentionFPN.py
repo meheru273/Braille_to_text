@@ -90,6 +90,7 @@ class FPN(nn.Module):
         # FCOS strides for compatibility
         self.strides = [8, 16, 32, 64, 128]
         self.scales = nn.Parameter(torch.tensor([8.,16.,32.,64.,128.]))
+
         
         # Feature channels from backbone
         backbone_channels = [64, 128, 256, 512]

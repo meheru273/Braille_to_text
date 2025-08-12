@@ -103,7 +103,7 @@ def _compute_loss(
 ):
     """
     Compute original FCOS losses (classification, centerness, regression)
-    *** FIXED: Apply sigmoid to centerness predictions before BCE loss ***
+    *** FIXED: Apply sigmoid to centerness predictions + shape validation ***
     """
     device = classes[0].device
     num_classes = classes[0].shape[-1]
@@ -124,6 +124,18 @@ def _compute_loss(
         cent_t = centerness_targets[idx].to(device) # [B, H, W]
         box_t = box_targets[idx].to(device)        # [B, H, W, 4]
         
+        # *** SHAPE VALIDATION AND FIXING ***
+        # Ensure predictions and targets have same spatial dimensions
+        B, H_p, W_p, C = cls_p.shape
+        B_t, H_t, W_t = cls_t.shape
+        
+        if H_p != H_t or W_p != W_t:
+            print(f"Level {idx}: Shape mismatch - Pred: {cls_p.shape}, Target: {cls_t.shape}")
+            # Resize targets to match predictions
+            cls_t = F.interpolate(cls_t.unsqueeze(1).float(), size=(H_p, W_p), mode='nearest').squeeze(1).long()
+            cent_t = F.interpolate(cent_t.unsqueeze(1), size=(H_p, W_p), mode='nearest').squeeze(1)
+            box_t = F.interpolate(box_t.permute(0, 3, 1, 2), size=(H_p, W_p), mode='nearest').permute(0, 2, 3, 1)
+        
         # Flatten for loss computation
         cls_p_flat = cls_p.view(-1, num_classes)
         cls_t_flat = cls_t.view(-1).long()
@@ -131,6 +143,9 @@ def _compute_loss(
         cent_t_flat = cent_t.view(-1)
         box_p_flat = box_p.view(-1, 4)
         box_t_flat = box_t.view(-1, 4)
+        
+        # Additional safety check
+        assert cls_p_flat.shape[0] == cls_t_flat.shape[0], f"Level {idx}: Flattened size mismatch {cls_p_flat.shape[0]} vs {cls_t_flat.shape[0]}"
         
         # Positive samples mask
         pos_mask = cls_t_flat > 0
@@ -142,7 +157,7 @@ def _compute_loss(
             cls_loss = cls_loss / num_positives
         classification_losses.append(cls_loss)
         
-        # *** CRITICAL FIX: Apply sigmoid to centerness predictions ***
+        # *** CRITICAL FIX: Apply sigmoid to centerness predictions before BCE loss ***
         if num_positives > 0:
             # Apply sigmoid to convert logits to probabilities [0,1]
             cent_p_sigmoid = torch.sigmoid(cent_p_flat[pos_mask])

@@ -22,7 +22,7 @@ def generate_targets(
     centerness_target_by_feature = []
     box_targets_by_feature = []
 
-    m = (0, 64, 128, 256, 512, math.inf)
+    m = (64, 128, 256, 512, math.inf)
 
     for i, stride in enumerate(strides):
         feat_h = int(img_shape[2] / stride)
