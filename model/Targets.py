@@ -22,7 +22,16 @@ def generate_targets(
     centerness_target_by_feature = []
     box_targets_by_feature = []
 
-    m = (64, 128, 256, 512, math.inf)
+    # Using overlapping size ranges for better detection coverage
+    # Format: [(min_size, max_size), ...]
+    # This allows objects at boundary sizes to be detected by multiple levels
+    size_ranges = [
+        (0, 32),      # Level 0 (stride 8): very small objects
+        (28, 64),     # Level 1 (stride 16): small objects  
+        (32, 128),    # Level 2 (stride 32): medium objects
+        (64, 256),    # Level 3 (stride 64): large objects
+        (128, math.inf) # Level 4 (stride 128): very large objects
+    ]
 
     for i, stride in enumerate(strides):
         feat_h = int(img_shape[2] / stride)
@@ -32,8 +41,7 @@ def generate_targets(
         centerness_target_for_feature = torch.zeros(batch_size, feat_h, feat_w)
         box_target_for_feature = torch.zeros(batch_size, feat_h, feat_w, 4)
 
-        min_box_side = m[i]
-        max_box_side = m[i + 1]
+        min_box_side, max_box_side = size_ranges[i]
 
         for batch_idx, (class_labels, box_labels) in enumerate(
             zip(class_labels_by_batch, box_labels_by_batch)
