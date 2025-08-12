@@ -6,40 +6,95 @@ from typing import List, Tuple, Optional
 import numpy as np
 
 
-
 class FocalLoss(nn.Module):
-    """Focal Loss with positive normalization"""
-    def __init__(self, alpha=0.25, gamma=2.0, num_classes=2, reduction='sum'):
+    """
+    PROPERLY FIXED Focal Loss - normalizes by positive samples to prevent background dominance
+    """
+    def __init__(self, alpha=None, gamma=2.0, num_classes=26, reduction='positive_normalized'):
         super().__init__()
-        self.alpha = alpha
         self.gamma = gamma
-        self.num_classes = num_classes
         self.reduction = reduction
-    
-    def forward(self, inputs, targets):
-        """
-        Inputs: [N, num_classes]
-        Targets: [N] (class indices)
-        """
-        ce_loss = F.cross_entropy(inputs, targets, reduction='none')
-        pt = torch.exp(-ce_loss)
-        focal_weight = (1 - pt) ** self.gamma
+        self.num_classes = num_classes
         
-        if self.alpha is not None:
-            if isinstance(self.alpha, (list, tuple)):
-                alpha_t = torch.tensor(self.alpha)[targets].to(inputs.device)
+        # Handle alpha initialization
+        if isinstance(alpha, (list, np.ndarray, torch.Tensor)):
+            self.alpha = torch.tensor(alpha, dtype=torch.float32)
+        elif alpha == "auto":
+            if num_classes is None:
+                raise ValueError("num_classes must be provided for auto alpha calculation")
+            self.alpha = "auto"
+        else:
+            self.alpha = alpha
+
+    def forward(self, inputs, targets):
+        # Flatten inputs and targets for cross_entropy
+        ce_loss = F.cross_entropy(inputs, targets, reduction='none')
+        pt = torch.exp(-ce_loss)  # Probability of true class
+        
+        # Focal loss components
+        focal_weight = (1.0 - pt) ** self.gamma
+        
+        # Apply alpha weighting
+        if hasattr(self, 'alpha') and self.alpha is not None:
+            if isinstance(self.alpha, torch.Tensor):
+                alpha_tensor = self.alpha.to(targets.device)
+                alpha_t = alpha_tensor[targets]
             else:
                 alpha_t = self.alpha
-            focal_loss = alpha_t * focal_weight * ce_loss
-        else:
-            focal_loss = focal_weight * ce_loss
+            focal_weight *= alpha_t
         
-        if self.reduction == 'sum':
-            return focal_loss.sum()
+        focal_loss = focal_weight * ce_loss
+        
+        # *** CRITICAL FIX: Normalize by positive samples ***
+        if self.reduction == 'positive_normalized':
+            pos_mask = targets > 0
+            neg_mask = targets == 0
+            
+            num_pos = pos_mask.sum().item()
+            num_neg = neg_mask.sum().item()
+            
+            if num_pos > 0:
+                # Positive loss (full weight)
+                pos_loss = focal_loss[pos_mask].sum()
+                
+                # Negative loss (controlled weight to prevent dominance)
+                if num_neg > 0:
+                    neg_loss = focal_loss[neg_mask].sum()
+                    # Limit negative contribution - key insight!
+                    neg_weight = min(1.0, num_pos / num_neg * 3.0)
+                    neg_loss = neg_loss * neg_weight
+                else:
+                    neg_loss = 0.0
+                
+                # Normalize by positive samples
+                return (pos_loss + neg_loss) / num_pos
+            else:
+                # Fallback if no positive samples
+                return focal_loss.mean()
         elif self.reduction == 'mean':
             return focal_loss.mean()
+        elif self.reduction == 'sum':
+            return focal_loss.sum()
         else:
             return focal_loss
+
+    def calculate_auto_alpha(self, dataset):
+        num_classes = self.num_classes
+        class_counts = torch.zeros(num_classes)
+        total_samples = 0
+    
+        for *_, labels in dataset:
+            labels = labels.view(-1).long()
+            valid_labels = labels[(labels >= 0) & (labels < num_classes)]
+            class_counts += torch.bincount(valid_labels, minlength=num_classes)
+            total_samples += len(valid_labels)
+
+        class_weights = total_samples / (num_classes * (class_counts + 1e-6))
+        class_weights = torch.log(class_weights + 1.0)
+        class_weights = torch.clamp(class_weights, min=0.1, max=3.0)
+        self.alpha = class_weights
+        print(f"Auto-calculated alpha weights: {self.alpha}")
+
 
 
 def _compute_loss(

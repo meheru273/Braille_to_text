@@ -175,13 +175,6 @@ class COCOData(Dataset):
 
         if self.verbose:
             print(f"  Class mapping complete: {self.num_classes} classes found in dataset and expected list")
-            # Print first few mappings for verification
-            print(f"  Example mappings (ID -> Name):")
-            for i in range(min(5, self.num_classes)):
-                print(f"    {i} -> {self.contiguous_to_name[i]}")
-            if self.num_classes > 5:
-                 print(f"    ... (and {self.num_classes - 5} more)")
-
     def _print_dataset_summary(self):
         """Print dataset summary"""
         print(f"\nDATASET SUMMARY:")
@@ -205,7 +198,6 @@ class COCOData(Dataset):
         print(f"  Total annotations: {total_annotations}")
 
         # Show counts for classes in the order of EXPECTED_CLASSES
-        print(f"\nCLASS ANNOTATION COUNTS (in EXPECTED_CLASSES order):")
         for class_name in EXPECTED_CLASSES:
             if class_name in self.name_to_contiguous: # If this class is in our dataset
                  model_id = self.name_to_contiguous[class_name]
