@@ -8,7 +8,6 @@ import torch.nn as nn
 import torch.nn.functional as F
 from torch.utils.data import Dataset, DataLoader
 import gc
-from torch.amp import autocast, GradScaler
 
 # Import your existing modules
 from Targets import generate_targets
@@ -92,16 +91,15 @@ def train(train_dir: pathlib.Path,
 
     model.to(device)
     
-    # Enable mixed precision optimizations
+    # Enable CUDNN optimizations
     torch.backends.cudnn.benchmark = True
     if hasattr(torch.backends.cudnn, 'allow_tf32'):
         torch.backends.cudnn.allow_tf32 = True
     if hasattr(torch.backends.cuda, 'matmul'):
         torch.backends.cuda.matmul.allow_tf32 = True
     
-    # Optimizer setup
+    # Optimizer setup - No scaler needed without mixed precision
     optimizer = torch.optim.Adam(model.parameters(), lr=LEARNING_RATE)
-    scaler = GradScaler(init_scale=2.**16)
     
     start_epoch = 1
     best_val_loss = float('inf')
@@ -113,9 +111,6 @@ def train(train_dir: pathlib.Path,
         
         model.load_state_dict(checkpoint['model_state'])
         optimizer.load_state_dict(checkpoint['optimizer_state'])
-        
-        if 'scaler_state' in checkpoint:
-            scaler.load_state_dict(checkpoint['scaler_state'])
         
         start_epoch = checkpoint['epoch'] + 1
         if 'best_val_loss' in checkpoint:
@@ -147,8 +142,7 @@ def train(train_dir: pathlib.Path,
             x = x.to(device, non_blocking=True)
             optimizer.zero_grad(set_to_none=True)
             
-            # Forward pass with autocast
-            # with torch.cuda.amp.autocast():
+            # Forward pass without autocast
             batch_norm = normalize_batch(x)
             
             # Model returns (classes, centerness, regression, attention_maps)
@@ -169,8 +163,7 @@ def train(train_dir: pathlib.Path,
                 regression_weight=1.0
             )
             
-                
-                # Total loss is sum of all components
+            # Total loss is sum of all components
             total_loss = cls_loss + centerness_loss + reg_loss
             
             # Skip if NaN
@@ -178,12 +171,10 @@ def train(train_dir: pathlib.Path,
                 print(f"Warning: Non-finite loss at epoch {epoch}, batch {batch_idx}")
                 continue
             
-            # Backward pass
-            scaler.scale(total_loss).backward()
-            scaler.unscale_(optimizer)
+            # Backward pass without scaler
+            total_loss.backward()
             torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=10.0)
-            scaler.step(optimizer)
-            scaler.update()
+            optimizer.step()
             
             # Track losses
             epoch_losses['total'].append(total_loss.item())
@@ -225,35 +216,35 @@ def train(train_dir: pathlib.Path,
                     
                     x = x.to(device, non_blocking=True)
                     
-                    with autocast(device_type='cuda'):
-                        batch_norm = normalize_batch(x)
-                        
-                        # Model returns (classes, centerness, regression, attention_maps)
-                        cls_pred, centerness_pred, box_pred, attention_maps = model(batch_norm)
-                        
-                        # Generate targets for validation
-                        class_t, centerness_t, box_t = generate_targets(
-                            x.shape, class_labels, box_labels, model.strides
-                        )
-                        
-                        # Compute validation loss
-                        cls_loss, centerness_loss, reg_loss = _compute_loss(
-                            cls_pred, centerness_pred, box_pred,
-                            class_t, centerness_t, box_t,
-                            focal_loss,
-                            classification_weight=1.0,
-                            centerness_weight=1.0,
-                            regression_weight=1.0
-                        )
-                        
-                        val_total_loss = cls_loss + centerness_loss + reg_loss
-                        
-                        # Only add finite losses
-                        if torch.isfinite(val_total_loss):
-                            val_losses['total'].append(val_total_loss.item())
-                            val_losses['cls'].append(cls_loss.item())
-                            val_losses['centerness'].append(centerness_loss.item())
-                            val_losses['reg'].append(reg_loss.item())
+                    # Validation forward pass without autocast
+                    batch_norm = normalize_batch(x)
+                    
+                    # Model returns (classes, centerness, regression, attention_maps)
+                    cls_pred, centerness_pred, box_pred, attention_maps = model(batch_norm)
+                    
+                    # Generate targets for validation
+                    class_t, centerness_t, box_t = generate_targets(
+                        x.shape, class_labels, box_labels, model.strides
+                    )
+                    
+                    # Compute validation loss
+                    cls_loss, centerness_loss, reg_loss = _compute_loss(
+                        cls_pred, centerness_pred, box_pred,
+                        class_t, centerness_t, box_t,
+                        focal_loss,
+                        classification_weight=1.0,
+                        centerness_weight=1.0,
+                        regression_weight=1.0
+                    )
+                    
+                    val_total_loss = cls_loss + centerness_loss + reg_loss
+                    
+                    # Only add finite losses
+                    if torch.isfinite(val_total_loss):
+                        val_losses['total'].append(val_total_loss.item())
+                        val_losses['cls'].append(cls_loss.item())
+                        val_losses['centerness'].append(centerness_loss.item())
+                        val_losses['reg'].append(reg_loss.item())
             
             # Calculate average validation losses
             avg_val_losses = {k: np.mean(v) if v else float('inf') for k, v in val_losses.items()}
@@ -276,12 +267,11 @@ def train(train_dir: pathlib.Path,
                 best_val_loss = current_val_loss
                 print(f"  🎉 New best validation loss: {best_val_loss:.4f}")
                 
-                # Save best model checkpoint
+                # Save best model checkpoint without scaler state
                 checkpoint = {
                     'epoch': epoch,
                     'model_state': model.state_dict(),
                     'optimizer_state': optimizer.state_dict(),
-                    'scaler_state': scaler.state_dict(),
                     'best_val_loss': best_val_loss,
                     'config': {
                         'num_classes': num_classes,
@@ -298,7 +288,6 @@ def train(train_dir: pathlib.Path,
                 'epoch': epoch,
                 'model_state': model.state_dict(),
                 'optimizer_state': optimizer.state_dict(),
-                'scaler_state': scaler.state_dict(),
                 'best_val_loss': best_val_loss,
                 'config': {
                     'num_classes': num_classes,
