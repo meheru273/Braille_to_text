@@ -78,14 +78,14 @@ class FPN(nn.Module):
     Enhanced FPN with integrated attention mechanisms for Braille detection
     Compatible with original FCOS inference and target generation
     """
-    def __init__(self, num_classes=26, use_fpn_att: bool = True):
+    def __init__(self, num_classes=26, use_fpn_attt: bool = True):
         super().__init__()
         
         from BackBone import BackBone
         self.backbone = BackBone()
         
         self.num_classes = num_classes
-        self.use_fpn_att = use_fpn_att
+        self.use_fpn_attt = use_fpn_attt
 
         # FCOS strides for compatibility
         self.strides = [8, 16, 32, 64, 128]
@@ -112,7 +112,7 @@ class FPN(nn.Module):
         ])
         
         # Feature fusion layers
-        if self.use_fpn_att:
+        if self.use_fpn_attt:
             # Use cross-attention fusion between FPN levels
             self.fpn_cross_attention_fusion = FPNTransformerFusion(fpn_channels, num_heads=8)
         else:
@@ -146,7 +146,7 @@ class FPN(nn.Module):
     def _print_config(self):
         """Print the configuration of attention mechanisms"""
         print(f"FPN Configuration:")
-        print(f"  - FPN Cross-Attention: {self.use_fpn_att}")
+        print(f"  - FPN Cross-Attention: {self.use_fpn_attt}")
         print(f"  - Centerness Branch: Enabled (FCOS Compatible)")
         print(f"  - Number of Classes: {self.num_classes}")
         print(f"  - Strides: {self.strides}")
@@ -239,7 +239,7 @@ class FPN(nn.Module):
         fpn_features = [p3, p4, p5, p6, p7]  # Match original FCOS levels
         
         # Feature fusion with cross-attention or regular CNN
-        if self.use_fpn_att:
+        if self.use_fpn_attt:
             # Use cross-attention fusion between FPN levels
             fused_features = self.fpn_cross_attention_fusion(fpn_features)
         else:

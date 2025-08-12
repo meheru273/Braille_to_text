@@ -81,13 +81,13 @@ def train(train_dir: pathlib.Path,
         print("Creating improved model with FPN cross-attention...")
         model = FPN(
             num_classes=num_classes,
-            use_fpn_at=True  # Only this parameter is valid
+            use_fpn_att=True  # Only this parameter is valid
         )
     else:
         print("Creating baseline model...")
         model = FPN(
             num_classes=num_classes,
-            use_fpn_at=False
+            use_fpn_att=False
         )
 
     model.to(device)
@@ -284,7 +284,7 @@ def train(train_dir: pathlib.Path,
                     'best_val_loss': best_val_loss,
                     'config': {
                         'num_classes': num_classes,
-                        'use_fpn_at': model.use_fpn_at,
+                        'use_fpn_att': model.use_fpn_att,
                     }
                 }
                 
@@ -301,7 +301,7 @@ def train(train_dir: pathlib.Path,
                 'best_val_loss': best_val_loss,
                 'config': {
                     'num_classes': num_classes,
-                    'use_fpn_at': model.use_fpn_at,
+                    'use_fpn_att': model.use_fpn_att,
                 }
             }
             torch.save(checkpoint, f'checkpoint_epoch_{epoch}.pth')
