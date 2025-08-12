@@ -26,11 +26,11 @@ def generate_targets(
     # Format: [(min_size, max_size), ...]
     # This allows objects at boundary sizes to be detected by multiple levels
     size_ranges = [
-        (0, 32),      # Level 0 (stride 8): very small objects
-        (28, 64),     # Level 1 (stride 16): small objects  
-        (32, 128),    # Level 2 (stride 32): medium objects
-        (64, 256),    # Level 3 (stride 64): large objects
-        (128, math.inf) # Level 4 (stride 128): very large objects
+        (0, 64),      # Level 0 (stride 8): very small objects
+        (32, 128),     # Level 1 (stride 16): small objects  
+        (128, 256),    # Level 2 (stride 32): medium objects
+        (256, 512),    # Level 3 (stride 64): large objects
+        (512, math.inf) # Level 4 (stride 128): very large objects
     ]
 
     for i, stride in enumerate(strides):
