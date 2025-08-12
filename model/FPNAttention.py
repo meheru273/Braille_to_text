@@ -8,23 +8,22 @@ from Attention import (CoordinateAttention, CBAM, PositionAwareAttention)
 
 class FPN(nn.Module):
     """
-    Enhanced FPN with integrated attention mechanisms for Braille detection
-    Compatible with original FCOS inference and target generation
+    Modified FPN with centerness branch for FCOS compatibility
     """
-    def __init__(self, num_classes=26, use_coord: bool = False, use_cbam: bool = True, use_pos: bool = True):
+    def __init__(self, num_classes=2, use_coord: bool = False, use_cbam: bool = True, use_pos: bool = True):
         super().__init__()
         
         from BackBone import BackBone
         self.backbone = BackBone()
         
-        self.num_classes = num_classes
+        self.num_classes = num_classes  # Changed to 2 to match FCOS (BACKGROUND, CAR)
         self.use_coord = use_coord
         self.use_cbam = use_cbam
-        self.use_pos = use_pos  # positional attention
+        self.use_pos = use_pos
         
-        # CHANGED: Use original FCOS strides for compatibility
-        self.strides = [8, 16, 32, 64, 128]
-        self.scales = nn.Parameter(torch.tensor([8.,16.,32.,64.,128.]))
+        # FCOS-compatible strides and scales
+        self.strides = [8, 16, 32, 64, 128]  # Original FCOS strides
+        self.scales = nn.Parameter(torch.tensor([8., 16., 32., 64., 128.]))
         
         # Feature channels from backbone
         backbone_channels = [64, 128, 256, 512]
@@ -39,29 +38,31 @@ class FPN(nn.Module):
                 nn.Conv2d(in_ch, fpn_channels, kernel_size=1, bias=False)
             )
             
-            # Add coordinate attention to lateral connections if enabled
             if self.use_coord:
                 self.lateral_attention.append(
                     CoordinateAttention(fpn_channels, reduction=16)
                 )
             else:
-                # Identity module when coordinate attention is disabled
                 self.lateral_attention.append(nn.Identity())
         
-        # Extra FPN level
+        # Extra FPN levels (P6, P7)
         self.extra_convs = nn.ModuleList([
             nn.Sequential(
                 nn.Conv2d(fpn_channels, fpn_channels, 3, stride=2, padding=1),
                 nn.GroupNorm(32, fpn_channels),
                 nn.ReLU(inplace=True)
+            ),
+            nn.Sequential(
+                nn.Conv2d(fpn_channels, fpn_channels, 3, stride=2, padding=1), 
+                nn.GroupNorm(32, fpn_channels),
+                nn.ReLU(inplace=True)
             )
         ])
         
-        # Multi-scale feature fusion module with optional CBAM
+        # Multi-scale feature fusion with optional CBAM
         self.feature_fusion = nn.ModuleList()
         for _ in range(len(self.strides)):
             if self.use_cbam:
-                # With CBAM attention
                 self.feature_fusion.append(
                     nn.Sequential(
                         nn.Conv2d(fpn_channels, fpn_channels, 3, padding=1),
@@ -71,7 +72,6 @@ class FPN(nn.Module):
                     )
                 )
             else:
-                # Without CBAM attention
                 self.feature_fusion.append(
                     nn.Sequential(
                         nn.Conv2d(fpn_channels, fpn_channels, 3, padding=1),
@@ -79,11 +79,6 @@ class FPN(nn.Module):
                         nn.ReLU(inplace=True)
                     )
                 )
-        
-        # Position-aware attention modules for detection heads
-        if self.use_pos:
-            self.pos_attention_cls = PositionAwareAttention(fpn_channels, reduction=16)
-            self.pos_attention_reg = PositionAwareAttention(fpn_channels, reduction=16)
         
         # Spatial attention branches for loss computation
         self.spatial_attention = nn.ModuleList()
@@ -96,94 +91,97 @@ class FPN(nn.Module):
                 )
             )
         
-        # Enhanced detection heads
-        self.classification_head = self._make_head(fpn_channels, 128)
-        self.regression_head = self._make_head(fpn_channels, 128)
+        # FCOS-style detection heads
+        self.classification_head = nn.Sequential(
+            self._convgn(fpn_channels, fpn_channels),
+            nn.ReLU(inplace=True),
+            self._convgn(fpn_channels, fpn_channels),
+            nn.ReLU(inplace=True),
+            self._convgn(fpn_channels, fpn_channels),
+            nn.ReLU(inplace=True),
+            self._convgn(fpn_channels, fpn_channels),
+            nn.ReLU(inplace=True),
+        )
         
-        # ADDED: Centerness head for FCOS compatibility
-        self.centerness_head = self._make_head(fpn_channels, 128)
+        self.regression_head = nn.Sequential(
+            self._convgn(fpn_channels, fpn_channels),
+            nn.ReLU(inplace=True),
+            self._convgn(fpn_channels, fpn_channels),
+            nn.ReLU(inplace=True),
+            self._convgn(fpn_channels, fpn_channels),
+            nn.ReLU(inplace=True),
+            self._convgn(fpn_channels, fpn_channels),
+            nn.ReLU(inplace=True),
+        )
         
-        # Output layers
-        self.classification_to_class = nn.Conv2d(128, self.num_classes, 3, padding=1)
-        self.regression_to_bbox = nn.Conv2d(128, 4, 3, padding=1)
-        # ADDED: Centerness output layer
-        self.centerness_to_centerness = nn.Conv2d(128, 1, 3, padding=1)
+        # Output layers - FCOS style
+        self.classification_to_class = nn.Sequential(self._convgn(fpn_channels, self.num_classes))
+        self.classification_to_centerness = nn.Sequential(self._convgn(fpn_channels, 1))
+        self.regression_to_bbox = nn.Sequential(self._convgn(fpn_channels, 4))
         
-        # Initialize weights
-        self._initialize_weights()
+        # Initialize weights FCOS style
+        self._initialize_weights_fcos_style()
         
         # Print configuration
         self._print_config()
     
+    def _convgn(self, in_channels: int, out_channels: int, kernel_size=3, padding=1, stride=1) -> nn.Module:
+        """FCOS-style conv + group norm"""
+        return nn.Sequential(
+            nn.GroupNorm(32, in_channels),
+            nn.Conv2d(in_channels, out_channels, kernel_size=kernel_size, padding=padding, stride=stride),
+        )
+    
     def _print_config(self):
-        """Print the configuration of attention mechanisms"""
-        print(f"FPN Configuration:")
+        """Print the configuration"""
+        print(f"FPN Configuration (FCOS Compatible):")
         print(f"  - Coordinate Attention: {'Enabled' if self.use_coord else 'Disabled'}")
         print(f"  - CBAM Attention: {'Enabled' if self.use_cbam else 'Disabled'}")
         print(f"  - Position-Aware Attention: {'Enabled' if self.use_pos else 'Disabled'}")
-        print(f"  - Centerness Branch: Enabled (FCOS Compatible)")
         print(f"  - Number of Classes: {self.num_classes}")
         print(f"  - Strides: {self.strides}")
+        print(f"  - Scales: {self.scales.data.tolist()}")
     
-    def _make_head(self, in_channels: int, out_channels: int) -> nn.Module:
-        """Create detection head with regular convolutions and optional position attention"""
-        layers = []
+    def _initialize_weights_fcos_style(self):
+        """Initialize weights like original FCOS"""
+        for modules in [
+            self.regression_head,
+            self.classification_to_centerness,
+            self.classification_to_class,
+            self.classification_head,
+            self.lateral_convs,
+            self.extra_convs,
+        ]:
+            for module in modules.modules():
+                if isinstance(module, nn.Conv2d):
+                    torch.nn.init.normal_(module.weight, std=0.01)
+                    if module.bias is not None:
+                        torch.nn.init.constant_(module.bias, 0)
+                elif isinstance(module, nn.GroupNorm):
+                    torch.nn.init.constant_(module.weight, 1)
+                    torch.nn.init.constant_(module.bias, 0)
         
-        if self.use_pos:
-            # Add position-aware attention first
-            layers.append(PositionAwareAttention(in_channels, reduction=16))
-        
-        # First layer
-        layers.extend([
-            nn.Conv2d(in_channels, in_channels, 3, padding=1),
-            nn.GroupNorm(32, in_channels),
-            nn.ReLU(inplace=True)
-        ])
-        
-        # Second layer (regular convolution)
-        layers.extend([
-            nn.Conv2d(in_channels, in_channels, 3, padding=1),
-            nn.GroupNorm(32, in_channels),
-            nn.ReLU(inplace=True)
-        ])
-        
-        # Third layer
-        layers.extend([
-            nn.Conv2d(in_channels, out_channels, 3, padding=1),
-            nn.GroupNorm(min(32, out_channels // 4), out_channels),
-            nn.ReLU(inplace=True)
-        ])
-            
-        return nn.Sequential(*layers)
-    
-    def _initialize_weights(self):
-        """Initialize model weights"""
-        for m in self.modules():
-            if isinstance(m, nn.Conv2d):
-                nn.init.kaiming_normal_(m.weight, mode='fan_out', nonlinearity='relu')
-                if m.bias is not None:
-                    nn.init.constant_(m.bias, 0)
-            elif isinstance(m, nn.GroupNorm):
-                nn.init.constant_(m.weight, 1)
-                nn.init.constant_(m.bias, 0)
-        
-        # Initialize classification head with focal loss prior
-        prior_prob = 0.01  # Lower prior for better convergence
+        # Special initialization for classification head (focal loss prior)
+        prior_prob = 0.01
         bias_value = -math.log((1 - prior_prob) / prior_prob)
-        nn.init.constant_(self.classification_to_class.bias, bias_value)
-        nn.init.normal_(self.classification_to_class.weight, std=0.01)
-        
-        # Initialize regression head
-        nn.init.normal_(self.regression_to_bbox.weight, std=0.01)
-        nn.init.constant_(self.regression_to_bbox.bias, 0)
-        
-        # Initialize centerness head
-        nn.init.normal_(self.centerness_to_centerness.weight, std=0.01)
-        nn.init.constant_(self.centerness_to_centerness.bias, 0)
+        for module in self.classification_to_class.modules():
+            if isinstance(module, nn.Conv2d):
+                torch.nn.init.constant_(module.bias, bias_value)
+    
+    def freeze_backbone(self):
+        """Freeze backbone parameters"""
+        for param in self.backbone.parameters():
+            param.requires_grad = False
+
+    def unfreeze_backbone(self):
+        """Unfreeze backbone parameters"""
+        for param in self.backbone.parameters():
+            param.requires_grad = True
     
     def forward(self, x: torch.Tensor) -> Tuple[List[torch.Tensor], List[torch.Tensor], List[torch.Tensor], List[torch.Tensor]]:
         """
-        MODIFIED: Returns (classes, centerness, regression, attention_maps) for FCOS compatibility
+        Forward pass returning FCOS-compatible format:
+        Returns: (classes_by_feature, centerness_by_feature, reg_by_feature, attention_maps)
         """
         # Backbone forward
         backbone_features = self.backbone(x)
@@ -194,34 +192,31 @@ class FPN(nn.Module):
         for i, (conv, att, feat) in enumerate(zip(self.lateral_convs, 
                                                   self.lateral_attention,
                                                   [c2, c3, c4, c5])):
-            lateral = conv(feat)          
-            # Apply coordinate attention 
-            lateral = att(lateral)  # This handles both enabled and disabled cases
+            lateral = conv(feat)
+            lateral = att(lateral)  # Apply attention (or identity)
             laterals.append(lateral)
         
         # Top-down pathway
         p5 = laterals[3]
         p4 = laterals[2] + F.interpolate(p5, size=laterals[2].shape[2:], 
-                                        mode='bilinear', align_corners=False)
+                                        mode='bilinear', align_corners=True)
         p3 = laterals[1] + F.interpolate(p4, size=laterals[1].shape[2:], 
-                                        mode='bilinear', align_corners=False)
+                                        mode='bilinear', align_corners=True)
         p2 = laterals[0] + F.interpolate(p3, size=laterals[0].shape[2:], 
-                                        mode='bilinear', align_corners=False)
+                                        mode='bilinear', align_corners=True)
         
-        # Extra level
+        # Extra levels
         p6 = self.extra_convs[0](p5)
+        p7 = self.extra_convs[1](p6)
         
-        # MODIFIED: Use p3, p4, p5, p6, p7 structure like original FCOS
-        # Create p7 from p6
-        p7 = F.max_pool2d(p6, kernel_size=3, stride=2, padding=1)
+        # Skip P2, use P3-P7 like original FCOS
+        fpn_features = [p3, p4, p5, p6, p7]
         
         # Apply feature fusion with optional CBAM
-        fpn_features = [p3, p4, p5, p6, p7]  # Match original FCOS levels
         fused_features = []
         attention_maps = []
         
         for i, (feat, fusion) in enumerate(zip(fpn_features, self.feature_fusion)):
-            # Feature fusion already handles CBAM based on use_cbam flag in __init__
             fused = fusion(feat)
             fused_features.append(fused)
             
@@ -229,45 +224,43 @@ class FPN(nn.Module):
             att_map = self.spatial_attention[i](fused)
             attention_maps.append(att_map)
         
-        # Detection heads (with optional position-aware attention integrated)
+        # FCOS-style detection heads
         classes_by_feature = []
-        centerness_by_feature = []  # ADDED for FCOS compatibility
-        regression_by_feature = []
+        centerness_by_feature = []
+        reg_by_feature = []
         
         for scale, feat in zip(self.scales, fused_features):
-            # Classification (position attention is now integrated in the head)
-            cls_feat = self.classification_head(feat)
-            classes = torch.sigmoid(self.classification_to_class(cls_feat))  # Apply sigmoid like original
+            # Classification branch
+            classification = self.classification_head(feat)
+            classes = self.classification_to_class(classification).sigmoid()
+            centerness = self.classification_to_centerness(classification).sigmoid()
             
-            # ADDED: Centerness prediction
-            cent_feat = self.centerness_head(feat)
-            centerness = torch.sigmoid(self.centerness_to_centerness(cent_feat))
+            # Regression branch
+            reg = torch.exp(self.regression_head(feat)) * scale
             
-            # Regression (position attention is now integrated in the head)
-            reg_feat = self.regression_head(feat)
-            bbox_pred = torch.exp(self.regression_to_bbox(reg_feat)) * scale  # Scale like original
-            
-            # Reshape outputs to match original FCOS format: B[C]HW -> BHW[C]
+            # Reshape to FCOS format: B[C]HW -> BHW[C]
             classes = classes.permute(0, 2, 3, 1).contiguous()
             centerness = centerness.permute(0, 2, 3, 1).contiguous().squeeze(3)
-            bbox_pred = bbox_pred.permute(0, 2, 3, 1).contiguous()
+            reg = reg.permute(0, 2, 3, 1).contiguous()
             
             classes_by_feature.append(classes)
             centerness_by_feature.append(centerness)
-            regression_by_feature.append(bbox_pred)
+            reg_by_feature.append(reg)
         
-        # MODIFIED: Return format compatible with original FCOS
-        return classes_by_feature, centerness_by_feature, regression_by_feature, attention_maps
+        return classes_by_feature, centerness_by_feature, reg_by_feature, attention_maps
 
 
-# Helper function to normalize batch (kept from your implementation)
 def normalize_batch(x: torch.Tensor) -> torch.Tensor:
-    """Proper normalization for training and inference consistency"""
+    """
+    FCOS-compatible normalization
+    """
+    # Handle both normalized and unnormalized inputs
     if x.max() > 1.0:
         x = x / 255.0
     
-    mean = torch.tensor([0.485, 0.456, 0.406]).to(x.device).view(1, 3, 1, 1)
-    std = torch.tensor([0.229, 0.224, 0.225]).to(x.device).view(1, 3, 1, 1)
+    # FCOS normalization (matching original)
+    mean = torch.tensor([0.485, 0.456, 0.406], device=x.device).view(1, 3, 1, 1)
+    std = torch.tensor([0.229, 0.224, 0.225], device=x.device).view(1, 3, 1, 1)
     
     x = (x - mean) / std
     return x

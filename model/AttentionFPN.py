@@ -263,7 +263,8 @@ class FPN(nn.Module):
             cls_out = torch.sigmoid(self.classification_to_class(cls_feat))
             
             cent_feat = self.centerness_head(feat)
-            cent_out = torch.sigmoid(self.centerness_to_centerness(cent_feat))
+            # CHANGE: Output logits instead of sigmoid for BCEWithLogitsLoss compatibility
+            cent_out = self.centerness_to_centerness(cent_feat)  # Remove torch.sigmoid()
             
             reg_feat = self.regression_head(feat)
             reg_out = torch.exp(self.regression_to_bbox(reg_feat)) * scale

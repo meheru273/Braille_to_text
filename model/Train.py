@@ -148,29 +148,30 @@ def train(train_dir: pathlib.Path,
             optimizer.zero_grad(set_to_none=True)
             
             # Forward pass with autocast
-            with autocast(device_type='cuda'):
-                batch_norm = normalize_batch(x)
-                
-                # Model returns (classes, centerness, regression, attention_maps)
-                cls_pred, centerness_pred, box_pred, attention_maps = model(batch_norm)
-                
-                # Generate targets (returns class_targets, centerness_targets, box_targets)
-                class_t, centerness_t, box_t = generate_targets(
-                    x.shape, class_labels, box_labels, model.strides
-                )
-                
-                # Compute FCOS losses using your _compute_loss function
-                cls_loss, centerness_loss, reg_loss = _compute_loss(
-                    cls_pred, centerness_pred, box_pred,
-                    class_t, centerness_t, box_t,
-                    focal_loss,
-                    classification_weight=1.0,
-                    centerness_weight=1.0,
-                    regression_weight=1.0
-                )
+            # with torch.cuda.amp.autocast():
+            batch_norm = normalize_batch(x)
+            
+            # Model returns (classes, centerness, regression, attention_maps)
+            cls_pred, centerness_pred, box_pred, attention_maps = model(batch_norm)
+            
+            # Generate targets (returns class_targets, centerness_targets, box_targets)
+            class_t, centerness_t, box_t = generate_targets(
+                x.shape, class_labels, box_labels, model.strides
+            )
+            
+            # Compute FCOS losses using your _compute_loss function
+            cls_loss, centerness_loss, reg_loss = _compute_loss(
+                cls_pred, centerness_pred, box_pred,
+                class_t, centerness_t, box_t,
+                focal_loss,
+                classification_weight=1.0,
+                centerness_weight=1.0,
+                regression_weight=1.0
+            )
+            
                 
                 # Total loss is sum of all components
-                total_loss = cls_loss + centerness_loss + reg_loss
+            total_loss = cls_loss + centerness_loss + reg_loss
             
             # Skip if NaN
             if not torch.isfinite(total_loss):
