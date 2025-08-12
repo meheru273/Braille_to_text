@@ -3,118 +3,311 @@ import torch.nn as nn
 import torch.nn.functional as F
 import math
 
-class ChannelAttention(nn.Module):
-    def __init__(self, in_channels, reduction=16):
-        super(ChannelAttention, self).__init__()
-        self.avg_pool = nn.AdaptiveAvgPool2d(1)
-        self.max_pool = nn.AdaptiveMaxPool2d(1)
-        
-        # Shared MLP
-        self.fc = nn.Sequential(
-            nn.Conv2d(in_channels, in_channels // reduction, 1, bias=False),
-            nn.ReLU(inplace=True),
-            nn.Conv2d(in_channels // reduction, in_channels, 1, bias=False)
-        )
-        self.sigmoid = nn.Sigmoid()
-    
-    def forward(self, x):
-        avg_out = self.fc(self.avg_pool(x))
-        max_out = self.fc(self.max_pool(x))
-        attention = self.sigmoid(avg_out + max_out)
-        return x * attention
 
-class SpatialAttention(nn.Module):
-    def __init__(self, kernel_size=7):
-        super(SpatialAttention, self).__init__()
-        self.conv = nn.Conv2d(2, 1, kernel_size, padding=kernel_size//2, bias=False)
-        self.sigmoid = nn.Sigmoid()
-    
-    def forward(self, x):
-        avg_out = torch.mean(x, dim=1, keepdim=True)
-        max_out, _ = torch.max(x, dim=1, keepdim=True)
-        attention_map = torch.cat([avg_out, max_out], dim=1)
-        attention = self.sigmoid(self.conv(attention_map))
-        return x * attention
-
-class CBAM(nn.Module):
-    def __init__(self, in_channels, reduction=16, kernel_size=7):
-        super(CBAM, self).__init__()
-        self.channel_attention = ChannelAttention(in_channels, reduction)
-        self.spatial_attention = SpatialAttention(kernel_size)
-    
-    def forward(self, x):
-        # Apply channel attention first
-        x = self.channel_attention(x)
-        # Then apply spatial attention
-        y = self.spatial_attention(x)
-        return y
-
-
-    
-class CoordinateAttention(nn.Module):
-    def __init__(self, channels, reduction=32):
+class TransformerSelfAttention2D(nn.Module):
+    """
+    Pure Transformer Self-Attention adapted for 2D feature maps
+    Identical to transformer attention but processes spatial locations
+    """
+    def __init__(self, d_model, num_heads=8, dropout=0.1):
         super().__init__()
-        self.pool_h = nn.AdaptiveAvgPool2d((None, 1))
-        self.pool_w = nn.AdaptiveAvgPool2d((1, None))
+        assert d_model % num_heads == 0
         
-        mip = max(8, channels // reduction)
-        self.conv1 = nn.Conv2d(channels, mip, 1)
-        self.conv_h = nn.Conv2d(mip, channels, 1)
-        self.conv_w = nn.Conv2d(mip, channels, 1)
+        self.d_model = d_model
+        self.num_heads = num_heads
+        self.d_k = d_model // num_heads
+        
+        self.w_q = nn.Linear(d_model, d_model, bias=False)
+        self.w_k = nn.Linear(d_model, d_model, bias=False)
+        self.w_v = nn.Linear(d_model, d_model, bias=False)
+        self.w_o = nn.Linear(d_model, d_model)
+        
+        self.dropout = nn.Dropout(dropout)
+        self.layer_norm = nn.LayerNorm(d_model)
+        
+    def forward(self, x):
+        """
+        x: [B, C, H, W] -> [B, C, H, W]
+        """
+        B, C, H, W = x.shape
+        residual = x
+        
+        # Reshape to sequence: [B, H*W, C]
+        x = x.view(B, C, H * W).permute(0, 2, 1)  # [B, H*W, C]
+        
+        # Apply layer norm
+        x = self.layer_norm(x)
+        
+        # Generate Q, K, V
+        Q = self.w_q(x).view(B, H * W, self.num_heads, self.d_k).transpose(1, 2)  # [B, heads, H*W, d_k]
+        K = self.w_k(x).view(B, H * W, self.num_heads, self.d_k).transpose(1, 2)  # [B, heads, H*W, d_k]
+        V = self.w_v(x).view(B, H * W, self.num_heads, self.d_k).transpose(1, 2)  # [B, heads, H*W, d_k]
+        
+        # Scaled dot-product attention
+        scores = torch.matmul(Q, K.transpose(-2, -1)) / math.sqrt(self.d_k)  # [B, heads, H*W, H*W]
+        attn_weights = F.softmax(scores, dim=-1)
+        attn_weights = self.dropout(attn_weights)
+        
+        # Apply attention to values
+        attn_output = torch.matmul(attn_weights, V)  # [B, heads, H*W, d_k]
+        
+        # Concatenate heads
+        attn_output = attn_output.transpose(1, 2).contiguous().view(B, H * W, self.d_model)  # [B, H*W, C]
+        
+        # Output projection
+        output = self.w_o(attn_output)  # [B, H*W, C]
+        
+        # Reshape back to [B, C, H, W]
+        output = output.permute(0, 2, 1).view(B, C, H, W)
+        
+        # Residual connection
+        return output + residual
+
+
+class TransformerCrossAttention2D(nn.Module):
+    """
+    Enhanced Cross-Attention for FPN feature fusion
+    Query attends to Key-Value with proper spatial handling
+    """
+    def __init__(self, d_model, num_heads=8, dropout=0.1):
+        super().__init__()
+        assert d_model % num_heads == 0
+        
+        self.d_model = d_model
+        self.num_heads = num_heads
+        self.d_k = d_model // num_heads
+        
+        self.w_q = nn.Linear(d_model, d_model, bias=False)
+        self.w_k = nn.Linear(d_model, d_model, bias=False)
+        self.w_v = nn.Linear(d_model, d_model, bias=False)
+        self.w_o = nn.Linear(d_model, d_model)
+        
+        self.dropout = nn.Dropout(dropout)
+        self.layer_norm_query = nn.LayerNorm(d_model)
+        self.layer_norm_kv = nn.LayerNorm(d_model)
+        
+        # Add positional encoding for better spatial understanding
+        self.register_buffer('pe_cache', None)
+        
+    def _get_positional_encoding(self, H, W, device):
+        """Generate or retrieve cached positional encoding"""
+        if self.pe_cache is None or self.pe_cache.shape != (1, self.d_model, H, W):
+            pe = torch.zeros(1, self.d_model, H, W, device=device)
+            
+            position_h = torch.arange(0, H, dtype=torch.float32, device=device).unsqueeze(1)
+            position_w = torch.arange(0, W, dtype=torch.float32, device=device).unsqueeze(0)
+            
+            div_term = torch.exp(torch.arange(0, self.d_model // 2, 2, dtype=torch.float32, device=device) * 
+                               (-math.log(10000.0) / (self.d_model // 2)))
+            
+            pe[0, 0::4, :, :] = torch.sin(position_h * div_term.view(-1, 1, 1))[:self.d_model//4]
+            pe[0, 1::4, :, :] = torch.cos(position_h * div_term.view(-1, 1, 1))[:self.d_model//4]
+            pe[0, 2::4, :, :] = torch.sin(position_w * div_term.view(-1, 1, 1))[:self.d_model//4]
+            pe[0, 3::4, :, :] = torch.cos(position_w * div_term.view(-1, 1, 1))[:self.d_model//4]
+            
+            self.pe_cache = pe
+        
+        return self.pe_cache
+    
+    def forward(self, query_feat, key_value_feat):
+        """
+        query_feat: [B, C, H, W] - the feature to be enhanced
+        key_value_feat: [B, C, H', W'] - the feature to attend to
+        Returns: [B, C, H, W] - enhanced query feature
+        """
+        B, C, H, W = query_feat.shape
+        _, _, H_kv, W_kv = key_value_feat.shape
+        
+        # Add positional encoding
+        pe_q = self._get_positional_encoding(H, W, query_feat.device)
+        pe_kv = self._get_positional_encoding(H_kv, W_kv, key_value_feat.device)
+        
+        query_with_pe = query_feat + pe_q
+        kv_with_pe = key_value_feat + pe_kv
+        
+        # Reshape to sequences
+        query = query_with_pe.view(B, C, H * W).permute(0, 2, 1)  # [B, H*W, C]
+        key_value = kv_with_pe.view(B, C, H_kv * W_kv).permute(0, 2, 1)  # [B, H'*W', C]
+        
+        # Apply layer norms
+        query = self.layer_norm_query(query)
+        key_value = self.layer_norm_kv(key_value)
+        
+        # Generate Q from query, K,V from key_value
+        Q = self.w_q(query).view(B, H * W, self.num_heads, self.d_k).transpose(1, 2)
+        K = self.w_k(key_value).view(B, H_kv * W_kv, self.num_heads, self.d_k).transpose(1, 2)
+        V = self.w_v(key_value).view(B, H_kv * W_kv, self.num_heads, self.d_k).transpose(1, 2)
+        
+        # Scaled dot-product attention
+        scores = torch.matmul(Q, K.transpose(-2, -1)) / math.sqrt(self.d_k)
+        attn_weights = F.softmax(scores, dim=-1)
+        attn_weights = self.dropout(attn_weights)
+        
+        # Apply attention
+        attn_output = torch.matmul(attn_weights, V)
+        attn_output = attn_output.transpose(1, 2).contiguous().view(B, H * W, self.d_model)
+        
+        # Output projection
+        output = self.w_o(attn_output)
+        output = output.permute(0, 2, 1).view(B, C, H, W)
+        
+        # Residual connection
+        return output + query_feat
+
+
+class WindowedTransformerAttention(nn.Module):
+    """
+    Windowed Self-Attention (like Swin Transformer)
+    More efficient for large feature maps
+    """
+    def __init__(self, d_model, num_heads=8, window_size=7, dropout=0.1):
+        super().__init__()
+        self.d_model = d_model
+        self.num_heads = num_heads
+        self.window_size = window_size
+        self.d_k = d_model // num_heads
+        
+        self.w_q = nn.Linear(d_model, d_model, bias=False)
+        self.w_k = nn.Linear(d_model, d_model, bias=False)
+        self.w_v = nn.Linear(d_model, d_model, bias=False)
+        self.w_o = nn.Linear(d_model, d_model)
+        
+        self.dropout = nn.Dropout(dropout)
+        self.layer_norm = nn.LayerNorm(d_model)
+        
+    def forward(self, x):
+        B, C, H, W = x.shape
+        residual = x
+        
+        # Pad if necessary
+        pad_h = (self.window_size - H % self.window_size) % self.window_size
+        pad_w = (self.window_size - W % self.window_size) % self.window_size
+        
+        if pad_h > 0 or pad_w > 0:
+            x = F.pad(x, (0, pad_w, 0, pad_h))
+        
+        _, _, H_pad, W_pad = x.shape
+        
+        # Partition into windows
+        x = x.view(B, C, H_pad // self.window_size, self.window_size, 
+                   W_pad // self.window_size, self.window_size)
+        x = x.permute(0, 2, 4, 3, 5, 1).contiguous()  # [B, num_h, num_w, ws, ws, C]
+        x = x.view(B * (H_pad // self.window_size) * (W_pad // self.window_size), 
+                   self.window_size * self.window_size, C)  # [B*num_windows, ws*ws, C]
+        
+        # Apply transformer attention within each window
+        x = self.layer_norm(x)
+        
+        Q = self.w_q(x).view(x.shape[0], x.shape[1], self.num_heads, self.d_k).transpose(1, 2)
+        K = self.w_k(x).view(x.shape[0], x.shape[1], self.num_heads, self.d_k).transpose(1, 2)
+        V = self.w_v(x).view(x.shape[0], x.shape[1], self.num_heads, self.d_k).transpose(1, 2)
+        
+        scores = torch.matmul(Q, K.transpose(-2, -1)) / math.sqrt(self.d_k)
+        attn_weights = F.softmax(scores, dim=-1)
+        attn_weights = self.dropout(attn_weights)
+        
+        attn_output = torch.matmul(attn_weights, V)
+        attn_output = attn_output.transpose(1, 2).contiguous().view(
+            x.shape[0], x.shape[1], self.d_model)
+        
+        output = self.w_o(attn_output)
+        
+        # Reshape back
+        output = output.view(B, H_pad // self.window_size, W_pad // self.window_size,
+                           self.window_size, self.window_size, C)
+        output = output.permute(0, 5, 1, 3, 2, 4).contiguous()
+        output = output.view(B, C, H_pad, W_pad)
+        
+        # Remove padding
+        if pad_h > 0 or pad_w > 0:
+            output = output[:, :, :H, :W]
+        
+        return output + residual
+
+
+class MultiScaleCrossAttention(nn.Module):
+    """
+    Advanced multi-scale cross-attention for FPN fusion
+    Each scale can attend to all other scales with adaptive weights
+    """
+    def __init__(self, d_model, num_heads=8, num_scales=5, dropout=0.1):
+        super().__init__()
+        self.d_model = d_model
+        self.num_heads = num_heads
+        self.num_scales = num_scales
+        
+        # Cross-attention modules for each scale interaction
+        self.cross_attentions = nn.ModuleList([
+            TransformerCrossAttention2D(d_model, num_heads, dropout)
+            for _ in range(num_scales)
+        ])
+        
+        # Learnable attention weights for combining multi-scale features
+        self.scale_weights = nn.Parameter(torch.ones(num_scales, num_scales))
+        
+        # Feature refinement after fusion
+        self.refine_conv = nn.Sequential(
+            nn.Conv2d(d_model, d_model, 3, padding=1),
+            nn.GroupNorm(32, d_model),
+            nn.ReLU(inplace=True),
+            nn.Conv2d(d_model, d_model, 1),
+        )
+        
+    def forward(self, features):
+        """
+        features: List of [B, C, H_i, W_i] feature maps
+        Returns: List of enhanced feature maps
+        """
+        if len(features) != self.num_scales:
+            raise ValueError(f"Expected {self.num_scales} features, got {len(features)}")
+        
+        enhanced_features = []
+        
+        # Normalize attention weights
+        norm_weights = F.softmax(self.scale_weights, dim=1)
+        
+        for i, query_feat in enumerate(features):
+            enhanced_feat = query_feat
+            
+            # Attend to all other scales
+            for j, key_feat in enumerate(features):
+                if i != j:
+                    # Get the attention weight for this scale interaction
+                    weight = norm_weights[i, j]
+                    
+                    # Apply cross-attention
+                    cross_attended = self.cross_attentions[i](query_feat, key_feat)
+                    enhanced_feat = enhanced_feat + weight * cross_attended
+            
+            # Refine the fused feature
+            enhanced_feat = self.refine_conv(enhanced_feat)
+            enhanced_features.append(enhanced_feat)
+        
+        return enhanced_features
+
+
+class PositionalEncoding2D(nn.Module):
+    """
+    2D Positional encoding for transformer attention
+    """
+    def __init__(self, d_model, max_h=200, max_w=250):
+        super().__init__()
+        
+        pe = torch.zeros(max_h, max_w, d_model)
+        
+        position_h = torch.arange(0, max_h, dtype=torch.float).unsqueeze(1).unsqueeze(2)
+        position_w = torch.arange(0, max_w, dtype=torch.float).unsqueeze(0).unsqueeze(2)
+        
+        div_term = torch.exp(torch.arange(0, d_model // 2, 2).float() * 
+                           (-math.log(10000.0) / (d_model // 2)))
+        
+        pe[:, :, 0::4] = torch.sin(position_h * div_term)
+        pe[:, :, 1::4] = torch.cos(position_h * div_term)
+        pe[:, :, 2::4] = torch.sin(position_w * div_term)
+        pe[:, :, 3::4] = torch.cos(position_w * div_term)
+        
+        self.register_buffer('pe', pe.permute(2, 0, 1).unsqueeze(0))  # [1, d_model, max_h, max_w]
     
     def forward(self, x):
-        n, c, h, w = x.size()
-        
-        # Memory-efficient implementation
-        x_h = self.pool_h(x)
-        x_w = self.pool_w(x).permute(0, 1, 3, 2)
-        
-        y = torch.cat([x_h, x_w], dim=2)
-        y = F.relu(self.conv1(y))
-        x_h, x_w = torch.split(y, [h, w], dim=2)
-        x_w = x_w.permute(0, 1, 3, 2)
-        
-        # Compute attention weights separately to save memory
-        att_h = torch.sigmoid(self.conv_h(x_h))
-        att_w = torch.sigmoid(self.conv_w(x_w))
-        
-        # Apply attention in-place to save memory
-        x = x * att_h
-        x = x * att_w
-        
-        return x
-
-class PositionAwareAttention(nn.Module):
-    """Lightweight position-aware attention without anchors"""
-    def __init__(self, channels, reduction=16):
-        super().__init__()
-        self.channels = channels
-        
-        # Position encoding generators
-        self.pos_h = nn.Parameter(torch.randn(1, channels // 2, 1, 1))
-        self.pos_w = nn.Parameter(torch.randn(1, channels // 2, 1, 1))
-        
-        # Feature transformation
-        self.transform = nn.Sequential(
-            nn.Conv2d(channels, channels // reduction, 1, bias=False),
-            nn.BatchNorm2d(channels // reduction),
-            nn.ReLU(inplace=True),
-            nn.Conv2d(channels // reduction, channels, 1, bias=False),
-            nn.Sigmoid()
-        )
-
-    def forward(self, x):
-        b, c, h, w = x.size()
-        
-        # Generate position encodings
-        pos_h = self.pos_h.expand(b, c // 2, h, 1).expand(b, c // 2, h, w)
-        pos_w = self.pos_w.expand(b, c // 2, 1, w).expand(b, c // 2, h, w)
-        pos_encoding = torch.cat([pos_h, pos_w], dim=1)
-        
-        # Add position information to features
-        enhanced_features = x + pos_encoding
-        
-        # Generate attention weights
-        attention = self.transform(enhanced_features)
-        
-        return x * attention
+        B, C, H, W = x.shape
+        return x + self.pe[:, :, :H, :W]

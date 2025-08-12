@@ -147,7 +147,6 @@ class COCOData(Dataset):
         temp_file.close()
 
         if self.verbose:
-            print(f"  Final categories ({len(clean_categories)}): {[cat['name'] for cat in clean_categories]}")
             print(f"  Removed {removed_count} orphaned annotations")
 
         return temp_file.name
@@ -188,7 +187,6 @@ class COCOData(Dataset):
         print(f"\nDATASET SUMMARY:")
         print(f"  Split: {self.split_dir.name}")
         print(f"  Images: {len(self.image_ids)}")
-        print(f"  Classes found in dataset and EXPECTED_CLASSES: {self.num_classes}")
         
         # Count annotations per class
         ann_counts = defaultdict(int)
@@ -218,7 +216,6 @@ class COCOData(Dataset):
             # else:
             #     print(f"     ({class_name:<20}) : Not present in this dataset")
 
-        print(f"\nFINAL MAPPING: Classes mapped to IDs 0 to {self.num_classes - 1} based on EXPECTED_CLASSES order")
 
 
     def __len__(self):

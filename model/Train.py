@@ -4,90 +4,22 @@ import logging
 from typing import List, Dict, Optional
 import numpy as np
 import torch
+import torch.nn as nn
 import torch.nn.functional as F
 from torch.utils.data import Dataset, DataLoader
 import gc
 from torch.amp import autocast, GradScaler
 
 # Import your existing modules
-from inference import detections_from_network_output
 from Targets import generate_targets
-from loss import _compute_loss
+from loss import FocalLoss, _compute_loss  
 from Dataset import collate_fn, COCOData
-from FPNAttention import (
-    FPN, compute_loss_with_attention, 
-    SpatialAttentionLoss, CenterAttentionLoss
-)
-from FPNAttention import normalize_batch
-from loss import FocalLoss
+from AttentionFPN import FPN, normalize_batch
 
 logger = logging.getLogger(__name__)
 
 # Memory optimization settings
 os.environ['PYTORCH_CUDA_ALLOC_CONF'] = 'max_split_size_mb:128,expandable_segments:True'
-
-
-class AdaptiveLearningRateScheduler:
-    """Custom scheduler that adapts based on loss plateaus"""
-    def __init__(self, optimizer, patience=10, factor=0.5, min_lr=1e-7):
-        self.optimizer = optimizer
-        self.patience = patience
-        self.factor = factor
-        self.min_lr = min_lr
-        self.best_loss = float('inf')
-        self.wait = 0
-        
-    def step(self, current_loss):
-        if current_loss < self.best_loss:
-            self.best_loss = current_loss
-            self.wait = 0
-        else:
-            self.wait += 1
-            
-        if self.wait >= self.patience:
-            self.wait = 0
-            for param_group in self.optimizer.param_groups:
-                param_group['lr'] = max(param_group['lr'] * self.factor, self.min_lr)
-            return True
-        return False
-    
-    def get_last_lr(self):
-        return [group['lr'] for group in self.optimizer.param_groups]
-
-
-def create_optimizer_with_layer_wise_lr(model, base_lr=1e-4):
-    """Create optimizer with layer-wise learning rates"""
-    param_groups = [
-        # Backbone - lowest learning rate
-        {'params': [], 'lr': base_lr * 0.1, 'name': 'backbone'},
-        # FPN lateral/extra convs - medium learning rate
-        {'params': [], 'lr': base_lr * 0.5, 'name': 'fpn'},
-        # Detection heads - highest learning rate
-        {'params': [], 'lr': base_lr, 'name': 'heads'},
-        # Attention modules - medium learning rate
-        {'params': [], 'lr': base_lr * 0.5, 'name': 'attention'}
-    ]
-    
-    for name, param in model.named_parameters():
-        if not param.requires_grad:
-            continue
-            
-        if 'backbone' in name:
-            param_groups[0]['params'].append(param)
-        elif 'lateral' in name or 'extra_conv' in name:
-            param_groups[1]['params'].append(param)
-        elif 'classification_head' in name or 'regression_head' in name or 'to_class' in name or 'to_bbox' in name:
-            param_groups[2]['params'].append(param)
-        elif 'attention' in name:
-            param_groups[3]['params'].append(param)
-        else:
-            param_groups[1]['params'].append(param)  # Default to FPN group
-    
-    # Remove empty groups
-    param_groups = [g for g in param_groups if g['params']]
-    
-    optimizer = torch.optim.AdamW(param_groups, weight_decay=1e-4)
-    return optimizer
 
 
 def train(train_dir: pathlib.Path, 
@@ -100,14 +32,9 @@ def train(train_dir: pathlib.Path,
     
     # Training hyperparameters
     BATCH_SIZE = 1
-    IMAGE_SIZE = (1600,2000)
-    BASE_LR = 1e-4
+    IMAGE_SIZE = (1600, 2000)
+    LEARNING_RATE = 1e-4
     NUM_EPOCHS = 50
-    WARMUP_EPOCHS = 5
-    
-    # Attention loss weights (can be tuned)
-    SPATIAL_ATT_WEIGHT = 0.1
-    CENTER_ATT_WEIGHT = 0.05
     
     # Ensure paths exist
     train_dir = pathlib.Path(train_dir)
@@ -149,12 +76,20 @@ def train(train_dir: pathlib.Path,
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"Using device: {device}")
     
-    # Create model
+    # Create model with the correct parameters
     if use_improved_model:
-        print("Creating improved model with attention...")
-        model = FPN(num_classes=num_classes,use_coord=False,use_cbam=True,use_deform=False)   
-    
-    
+        print("Creating improved model with FPN cross-attention...")
+        model = FPN(
+            num_classes=num_classes,
+            use_fpn_at=True  # Only this parameter is valid
+        )
+    else:
+        print("Creating baseline model...")
+        model = FPN(
+            num_classes=num_classes,
+            use_fpn_at=False
+        )
+
     model.to(device)
     
     # Enable mixed precision optimizations
@@ -164,18 +99,9 @@ def train(train_dir: pathlib.Path,
     if hasattr(torch.backends.cuda, 'matmul'):
         torch.backends.cuda.matmul.allow_tf32 = True
     
-    # Create optimizer and scalers
-    optimizer = create_optimizer_with_layer_wise_lr(model, BASE_LR)
+    # Optimizer setup
+    optimizer = torch.optim.Adam(model.parameters(), lr=LEARNING_RATE)
     scaler = GradScaler(init_scale=2.**16)
-    
-    # Learning rate schedulers
-    warmup_scheduler = torch.optim.lr_scheduler.LinearLR(
-        optimizer, start_factor=0.1, total_iters=WARMUP_EPOCHS
-    )
-    main_scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
-        optimizer, T_max=NUM_EPOCHS - WARMUP_EPOCHS, eta_min=1e-6
-    )
-    adaptive_scheduler = AdaptiveLearningRateScheduler(optimizer)
     
     start_epoch = 1
     best_val_loss = float('inf')
@@ -209,8 +135,7 @@ def train(train_dir: pathlib.Path,
         # =================== TRAINING PHASE ===================
         model.train()
         epoch_losses = {
-            'total': [], 'cls': [], 'reg': [], 
-            'spatial_att': [], 'center_att': []
+            'total': [], 'cls': [], 'centerness': [], 'reg': []
         }
         
         for batch_idx, (x, class_labels, box_labels) in enumerate(train_loader):
@@ -226,39 +151,26 @@ def train(train_dir: pathlib.Path,
             with autocast(device_type='cuda'):
                 batch_norm = normalize_batch(x)
                 
-                if use_improved_model:
-                    cls_pred, box_pred, attention_maps = model(batch_norm)
-                else:
-                    cls_pred, box_pred = model(batch_norm)
-                    attention_maps = None
+                # Model returns (classes, centerness, regression, attention_maps)
+                cls_pred, centerness_pred, box_pred, attention_maps = model(batch_norm)
                 
-                class_t, box_t = generate_targets(
+                # Generate targets (returns class_targets, centerness_targets, box_targets)
+                class_t, centerness_t, box_t = generate_targets(
                     x.shape, class_labels, box_labels, model.strides
                 )
                 
+                # Compute FCOS losses using your _compute_loss function
+                cls_loss, centerness_loss, reg_loss = _compute_loss(
+                    cls_pred, centerness_pred, box_pred,
+                    class_t, centerness_t, box_t,
+                    focal_loss,
+                    classification_weight=1.0,
+                    centerness_weight=1.0,
+                    regression_weight=1.0
+                )
                 
-                # Compute loss with attention
-                if use_improved_model:
-                    total_loss, cls_loss, reg_loss, spatial_loss, center_loss = \
-                        compute_loss_with_attention(
-                            cls_pred, box_pred, class_t, box_t,
-                            focal_loss, attention_maps,
-                            classification_weight=2.0,
-                            regression_weight=2.0,
-                            spatial_attention_weight=SPATIAL_ATT_WEIGHT,
-                            center_attention_weight=CENTER_ATT_WEIGHT,
-                            box_labels_by_batch=box_labels,
-                            img_shape=x.shape,
-                            strides=model.strides
-                        )
-                else:
-                    total_loss, cls_loss, reg_loss = _compute_loss(
-                        cls_pred, box_pred, class_t, box_t, focal_loss,
-                        box_labels_by_batch=box_labels,
-                        img_shape=x.shape,
-                        strides=model.strides
-                    )
-                    spatial_loss = center_loss = torch.tensor(0.0)
+                # Total loss is sum of all components
+                total_loss = cls_loss + centerness_loss + reg_loss
             
             # Skip if NaN
             if not torch.isfinite(total_loss):
@@ -275,54 +187,34 @@ def train(train_dir: pathlib.Path,
             # Track losses
             epoch_losses['total'].append(total_loss.item())
             epoch_losses['cls'].append(cls_loss.item())
+            epoch_losses['centerness'].append(centerness_loss.item())
             epoch_losses['reg'].append(reg_loss.item())
-            if use_improved_model:
-                epoch_losses['spatial_att'].append(spatial_loss.item())
-                epoch_losses['center_att'].append(center_loss.item())
             
             # Clean up
-            del total_loss, cls_loss, reg_loss
-            if use_improved_model:
-                del spatial_loss, center_loss, attention_maps
-        
-        # Update schedulers
-        if epoch <= WARMUP_EPOCHS:
-            warmup_scheduler.step()
-        else:
-            main_scheduler.step()
+            del total_loss, cls_loss, centerness_loss, reg_loss, attention_maps
         
         # Calculate average losses
         avg_losses = {k: np.mean(v) if v else 0 for k, v in epoch_losses.items()}
-        
-        # Adaptive learning rate adjustment
-        if epoch > WARMUP_EPOCHS:
-            plateau_detected = adaptive_scheduler.step(avg_losses['total'])
-            if plateau_detected:
-                print("Learning rate reduced due to plateau")
         
         # Log losses
         print(f"\nEpoch {epoch} Training Metrics:")
         print(f"  Total Loss: {avg_losses['total']:.4f}")
         print(f"  Classification Loss: {avg_losses['cls']:.4f}")
+        print(f"  Centerness Loss: {avg_losses['centerness']:.4f}")
         print(f"  Regression Loss: {avg_losses['reg']:.4f}")
-        if use_improved_model:
-            print(f"  Spatial Attention Loss: {avg_losses['spatial_att']:.4f}")
-            print(f"  Center Attention Loss: {avg_losses['center_att']:.4f}")
-        
         
         # Write to tensorboard
         writer.add_scalar('Loss/Total', avg_losses['total'], epoch)
         writer.add_scalar('Loss/Classification', avg_losses['cls'], epoch)
+        writer.add_scalar('Loss/Centerness', avg_losses['centerness'], epoch)
         writer.add_scalar('Loss/Regression', avg_losses['reg'], epoch)
-        if use_improved_model:
-            writer.add_scalar('Loss/SpatialAttention', avg_losses['spatial_att'], epoch)
-            writer.add_scalar('Loss/CenterAttention', avg_losses['center_att'], epoch)
+        writer.add_scalar('LearningRate', LEARNING_RATE, epoch)
         
         # =================== VALIDATION PHASE ===================
         current_val_loss = None
-        if epoch % 20 == 0 or epoch == NUM_EPOCHS:  # Validate every 20 epochs and at the end
+        if epoch % 5 == 0 or epoch == NUM_EPOCHS:  # Validate every 5 epochs and at the end
             model.eval()
-            val_losses = []
+            val_losses = {'total': [], 'cls': [], 'centerness': [], 'reg': []}
             
             print("Running validation...")
             with torch.no_grad():
@@ -335,52 +227,85 @@ def train(train_dir: pathlib.Path,
                     with autocast(device_type='cuda'):
                         batch_norm = normalize_batch(x)
                         
-                        if use_improved_model:
-                            cls_pred, box_pred, attention_maps = model(batch_norm)
-                        else:
-                            cls_pred, box_pred = model(batch_norm)
-                            attention_maps = None
+                        # Model returns (classes, centerness, regression, attention_maps)
+                        cls_pred, centerness_pred, box_pred, attention_maps = model(batch_norm)
                         
                         # Generate targets for validation
-                        class_t, box_t = generate_targets(
+                        class_t, centerness_t, box_t = generate_targets(
                             x.shape, class_labels, box_labels, model.strides
                         )
                         
                         # Compute validation loss
-                        if use_improved_model:
-                            val_loss, _, _, _, _ = compute_loss_with_attention(
-                                cls_pred, box_pred, class_t, box_t,
-                                focal_loss, attention_maps,
-                                classification_weight=2.0,
-                                regression_weight=2.0,
-                                spatial_attention_weight=SPATIAL_ATT_WEIGHT,
-                                center_attention_weight=CENTER_ATT_WEIGHT,
-                                box_labels_by_batch=box_labels,
-                                img_shape=x.shape,
-                                strides=model.strides
-                            )
-                        else:
-                            val_loss, _, _ = _compute_loss(
-                                cls_pred, box_pred, class_t, box_t, focal_loss,
-                                box_labels_by_batch=box_labels,
-                                img_shape=x.shape,
-                                strides=model.strides
-                            )
+                        cls_loss, centerness_loss, reg_loss = _compute_loss(
+                            cls_pred, centerness_pred, box_pred,
+                            class_t, centerness_t, box_t,
+                            focal_loss,
+                            classification_weight=1.0,
+                            centerness_weight=1.0,
+                            regression_weight=1.0
+                        )
+                        
+                        val_total_loss = cls_loss + centerness_loss + reg_loss
                         
                         # Only add finite losses
-                        if torch.isfinite(val_loss):
-                            val_losses.append(val_loss.item())
+                        if torch.isfinite(val_total_loss):
+                            val_losses['total'].append(val_total_loss.item())
+                            val_losses['cls'].append(cls_loss.item())
+                            val_losses['centerness'].append(centerness_loss.item())
+                            val_losses['reg'].append(reg_loss.item())
             
-            # Calculate average validation loss
-            current_val_loss = np.mean(val_losses) if val_losses else float('inf')
-            print(f"  Validation Loss: {current_val_loss:.4f}")
+            # Calculate average validation losses
+            avg_val_losses = {k: np.mean(v) if v else float('inf') for k, v in val_losses.items()}
+            current_val_loss = avg_val_losses['total']
+            
+            print(f"  Validation Metrics:")
+            print(f"    Total Loss: {avg_val_losses['total']:.4f}")
+            print(f"    Classification Loss: {avg_val_losses['cls']:.4f}")
+            print(f"    Centerness Loss: {avg_val_losses['centerness']:.4f}")
+            print(f"    Regression Loss: {avg_val_losses['reg']:.4f}")
             
             # Log to tensorboard
-            writer.add_scalar('Loss/Validation', current_val_loss, epoch)
+            writer.add_scalar('Loss/Validation_Total', avg_val_losses['total'], epoch)
+            writer.add_scalar('Loss/Validation_Classification', avg_val_losses['cls'], epoch)
+            writer.add_scalar('Loss/Validation_Centerness', avg_val_losses['centerness'], epoch)
+            writer.add_scalar('Loss/Validation_Regression', avg_val_losses['reg'], epoch)
             
             # Check if this is the best model
             if current_val_loss < best_val_loss:
                 best_val_loss = current_val_loss
                 print(f"  🎉 New best validation loss: {best_val_loss:.4f}")
+                
+                # Save best model checkpoint
+                checkpoint = {
+                    'epoch': epoch,
+                    'model_state': model.state_dict(),
+                    'optimizer_state': optimizer.state_dict(),
+                    'scaler_state': scaler.state_dict(),
+                    'best_val_loss': best_val_loss,
+                    'config': {
+                        'num_classes': num_classes,
+                        'use_fpn_at': model.use_fpn_at,
+                    }
+                }
+                
+                torch.save(checkpoint, f'best_model_epoch_{epoch}.pth')
+                print(f"  💾 Best model saved as best_model_epoch_{epoch}.pth")
         
-        
+        # Save regular checkpoint every 10 epochs
+        if epoch % 10 == 0:
+            checkpoint = {
+                'epoch': epoch,
+                'model_state': model.state_dict(),
+                'optimizer_state': optimizer.state_dict(),
+                'scaler_state': scaler.state_dict(),
+                'best_val_loss': best_val_loss,
+                'config': {
+                    'num_classes': num_classes,
+                    'use_fpn_at': model.use_fpn_at,
+                }
+            }
+            torch.save(checkpoint, f'checkpoint_epoch_{epoch}.pth')
+            print(f"  💾 Checkpoint saved as checkpoint_epoch_{epoch}.pth")
+    
+    print(f"\n🎊 Training completed! Best validation loss: {best_val_loss:.4f}")
+    return best_val_loss

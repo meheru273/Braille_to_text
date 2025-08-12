@@ -3,249 +3,91 @@ import torch
 import math
 
 
-import torch
-import math
+def generate_targets(
+    img_shape: torch.LongTensor,
+    class_labels_by_batch: List[torch.LongTensor],
+    box_labels_by_batch: List[torch.FloatTensor],
+    strides: List[int],
+) -> List[Tuple[torch.FloatTensor, torch.LongTensor]]:
+    """
+    Given the shape of the input image, the box and class labels, and the stride of each
+    feature map, construct the model targets for FCOS at each feature map scale.
+    """
+    if not len(box_labels_by_batch) == len(class_labels_by_batch) == img_shape[0]:
+        raise ValueError("labels and batch size must match")
 
-def generate_targets_adaptive(img_shape, class_labels_by_batch, box_labels_by_batch, strides, 
-                                  size_ranges=None, center_sampling=True, center_radius=1.5):
-    """
-    FIXED target generation that prevents tiny box predictions
-    """
-    batch_size, _, img_h, img_w = img_shape
-    
-    # Define proper size ranges for Braille characters
-    if size_ranges is None:
-        size_ranges = [
-            (0, 24),      # stride=2: very small Braille dots
-            (12, 48),     # stride=4: small characters
-            (24, 96),     # stride=8: medium characters
-            (48, 192),    # stride=16: large characters
-            (96, 512)     # stride=32: very large characters
-        ]
-    
-    class_targets = []
-    box_targets = []
-    
-    for level_idx, (stride, size_range) in enumerate(zip(strides, size_ranges)):
-        min_size, max_size = size_range
-        feat_h = img_h // stride
-        feat_w = img_w // stride
-        
-        cls_target = torch.zeros((batch_size, feat_h, feat_w), dtype=torch.long)
-        box_target = torch.zeros((batch_size, feat_h, feat_w, 4), dtype=torch.float32)
-        
-        for batch_idx, (labels, boxes) in enumerate(zip(class_labels_by_batch, box_labels_by_batch)):
-            if len(boxes) == 0:
-                continue
-            
-            for obj_idx, (label, box) in enumerate(zip(labels, boxes)):
-                x1, y1, x2, y2 = box
-                w, h = x2 - x1, y2 - y1
-                
-                # Use geometric mean for size assignment (better for small objects)
-                obj_size = math.sqrt(w * h)
-                
-                # Strict size filtering - only assign to appropriate levels
-                if not (min_size <= obj_size < max_size):
+    batch_size = img_shape[0]
+
+    class_targets_by_feature = []
+    centerness_target_by_feature = []
+    box_targets_by_feature = []
+
+    m = (0, 64, 128, 256, 512, math.inf)
+
+    for i, stride in enumerate(strides):
+        feat_h = int(img_shape[2] / stride)
+        feat_w = int(img_shape[3] / stride)
+
+        class_target_for_feature = torch.zeros(batch_size, feat_h, feat_w, dtype=int)
+        centerness_target_for_feature = torch.zeros(batch_size, feat_h, feat_w)
+        box_target_for_feature = torch.zeros(batch_size, feat_h, feat_w, 4)
+
+        min_box_side = m[i]
+        max_box_side = m[i + 1]
+
+        for batch_idx, (class_labels, box_labels) in enumerate(
+            zip(class_labels_by_batch, box_labels_by_batch)
+        ):
+            heights = box_labels[:, 3] - box_labels[:, 1]
+            widths = box_labels[:, 2] - box_labels[:, 0]
+            areas = torch.mul(widths, heights)
+
+            for j in torch.argsort(areas, dim=0, descending=True):
+                if max(heights[j], widths[j]) < min_box_side or max(heights[j], widths[j]) > max_box_side:
                     continue
-                
-                # Calculate object center
-                cx = (x1 + x2) / 2
-                cy = (y1 + y2) / 2
-                
-                if center_sampling:
-                    # Adaptive center sampling based on object size
-                    cx_feat = cx / stride
-                    cy_feat = cy / stride
-                    
-                    # CRITICAL FIX: Limit sampling radius to prevent tiny boxes
-                    radius = min(center_radius, max(w, h) / stride * 0.3)  # Max 30% of object size
-                    radius = max(0.5, radius)  # Ensure minimum radius
-                    
-                    x_min = int(max(0, cx_feat - radius))
-                    x_max = int(min(feat_w - 1, cx_feat + radius)) + 1
-                    y_min = int(max(0, cy_feat - radius))
-                    y_max = int(min(feat_h - 1, cy_feat + radius)) + 1
-                else:
-                    # Conservative bbox assignment
-                    x_min = max(0, int((x1 + w * 0.25) / stride))  # Start 25% into box
-                    y_min = max(0, int((y1 + h * 0.25) / stride))
-                    x_max = min(feat_w, int((x2 - w * 0.25) / stride) + 1)  # End 25% before edge
-                    y_max = min(feat_h, int((y2 - h * 0.25) / stride) + 1)
-                
-                # Ensure at least one pixel assignment
-                if x_max <= x_min:
-                    x_max = x_min + 1
-                if y_max <= y_min:
-                    y_max = y_min + 1
-                
-                # Assign targets with quality control
-                for feat_y in range(y_min, y_max):
-                    for feat_x in range(x_min, x_max):
-                        px = feat_x * stride + stride / 2
-                        py = feat_y * stride + stride / 2
-                        
-                        # Strict bounds checking
-                        if not (x1 <= px <= x2 and y1 <= py <= y2):
-                            continue
-                        
-                        # Calculate regression targets
-                        left = px - x1
-                        top = py - y1
-                        right = x2 - px
-                        bottom = y2 - py
-                        
-                        # CRITICAL: Quality control for regression targets
-                        min_distance = stride * 0.1  # Minimum 10% of stride
-                        max_distance = stride * 8.0  # Maximum 8x stride
-                        
-                        if (left >= min_distance and top >= min_distance and 
-                            right >= min_distance and bottom >= min_distance and
-                            left <= max_distance and top <= max_distance and
-                            right <= max_distance and bottom <= max_distance):
-                            
-                            # Only assign if current location is empty or has larger object
-                            current_label = cls_target[batch_idx, feat_y, feat_x].item()
-                            current_size = float('inf')
-                            
-                            if current_label > 0:
-                                # Calculate current object size from existing targets
-                                curr_box = box_target[batch_idx, feat_y, feat_x]
-                                current_size = (curr_box[0] + curr_box[2]) * (curr_box[1] + curr_box[3])
-                            
-                            obj_reg_size = (left + right) * (top + bottom)
-                            
-                            # Prefer smaller objects (they're harder to detect)
-                            if current_label == 0 or obj_reg_size < current_size:
-                                cls_target[batch_idx, feat_y, feat_x] = label
-                                
-                                # FIXED: Proper normalization with bounds
-                                box_target[batch_idx, feat_y, feat_x] = torch.tensor([
-                                    left / stride,
-                                    top / stride,
-                                    right / stride,
-                                    bottom / stride
-                                ], dtype=torch.float32)
-        
-        class_targets.append(cls_target)
-        box_targets.append(box_target)
-    
-    return class_targets, box_targets
 
+                min_x = max(int(box_labels[j][0] / stride), 0)
+                min_y = max(int(box_labels[j][1] / stride), 0)
+                max_x = min(int(box_labels[j][2] / stride) + 1, feat_w)
+                max_y = min(int(box_labels[j][3] / stride) + 1, feat_h)
 
-def generate_targets_multiscale(img_shape, class_labels_by_batch, box_labels_by_batch, strides):
-    """
-    Multi-scale assignment: assign each object to multiple FPN levels
-    This can help with small object detection
-    """
-    batch_size, _, img_h, img_w = img_shape
-    
-    class_targets = []
-    box_targets = []
-    
-    # Pre-calculate feature map dimensions
-    feature_sizes = []
-    for stride in strides:
-        feat_h = img_h // stride
-        feat_w = img_w // stride
-        feature_sizes.append((feat_h, feat_w))
-    
-    for level_idx, (stride, (feat_h, feat_w)) in enumerate(zip(strides, feature_sizes)):
-        # Initialize targets
-        cls_target = torch.zeros((batch_size, feat_h, feat_w), dtype=torch.long)
-        box_target = torch.zeros((batch_size, feat_h, feat_w, 4), dtype=torch.float32)
-        
-        for batch_idx, (labels, boxes) in enumerate(zip(class_labels_by_batch, box_labels_by_batch)):
-            if len(boxes) == 0:
-                continue
-            
-            for obj_idx, (label, box) in enumerate(zip(labels, boxes)):
-                x1, y1, x2, y2 = box
-                w, h = x2 - x1, y2 - y1
-                
-                # Calculate object size
-                obj_size = math.sqrt(w * h)
-                
-                # Multi-scale assignment weight
-                # Smaller objects get higher weight on finer levels
-                if level_idx == 0:  # Finest level
-                    weight = 1.0 if obj_size < 32 else 0.5
-                elif level_idx == len(strides) - 1:  # Coarsest level
-                    weight = 1.0 if obj_size > 128 else 0.5
-                else:  # Middle levels
-                    weight = 0.8
-                
-                # Random sampling based on weight
-                if torch.rand(1).item() > weight:
-                    continue
-                
-                # Calculate center
-                cx = (x1 + x2) / 2
-                cy = (y1 + y2) / 2
-                
-                # Center sampling region
-                cx_feat = cx / stride
-                cy_feat = cy / stride
-                
-                # Adaptive radius based on object size
-                radius = max(1.0, min(2.5, obj_size / stride / 4))
-                
-                x_min = int(max(0, cx_feat - radius))
-                x_max = int(min(feat_w - 1, cx_feat + radius)) + 1
-                y_min = int(max(0, cy_feat - radius))
-                y_max = int(min(feat_h - 1, cy_feat + radius)) + 1
-                
-                # Assign targets
-                for feat_y in range(y_min, y_max):
-                    for feat_x in range(x_min, x_max):
-                        px = feat_x * stride + stride / 2
-                        py = feat_y * stride + stride / 2
-                        
-                        if x1 <= px <= x2 and y1 <= py <= y2:
-                            left = px - x1
-                            top = py - y1
-                            right = x2 - px
-                            bottom = y2 - py
-                            
-                            if left > 0 and top > 0 and right > 0 and bottom > 0:
-                                # Distance from center for weighting
-                                dist = math.sqrt((px - cx)**2 + (py - cy)**2)
-                                center_weight = math.exp(-dist / (obj_size / 2))
-                                
-                                # Only assign if weight is high enough
-                                if center_weight > 0.3:
-                                    cls_target[batch_idx, feat_y, feat_x] = label
-                                    box_target[batch_idx, feat_y, feat_x] = torch.tensor([
-                                        left / stride,
-                                        top / stride,
-                                        right / stride,
-                                        bottom / stride
-                                    ], dtype=torch.float32)
-        
-        class_targets.append(cls_target)
-        box_targets.append(box_target)
-    
-    return class_targets, box_targets
+                mid_x = (max_x + min_x) / 2.0
+                mid_y = (max_y + min_y) / 2.0
+                b_w = max_x - min_x
+                b_h = max_y - min_y
+                for x in range(min_x, max_x):
+                    for y in range(min_y, max_y):
+                        if x == 0 or y == 0 or x == max_x - 1 or y == max_y - 1:
+                            dist = 0
+                        else:
+                            l = x - min_x
+                            r = max_x - 1 - x
+                            t = y - min_y
+                            b = max_y - 1 - y
+                            dist = math.sqrt(min(l, r) / float(max(l, r)) * min(t, b) / float(max(t, b)))
 
+                        centerness = dist
+                        centerness_target_for_feature[batch_idx, y, x] = centerness
 
-# Wrapper function to maintain compatibility
-def generate_targets(img_shape, class_labels_by_batch, box_labels_by_batch, strides, 
-                    method='adaptive', **kwargs):
-    """
-    Generate targets using specified method
-    
-    Args:
-        method: 'adaptive', 'multiscale', or 'original'
-    """
-    if method == 'adaptive':
-        return generate_targets_adaptive(
-            img_shape, class_labels_by_batch, box_labels_by_batch, strides, **kwargs
-        )
-    elif method == 'multiscale':
-        return generate_targets_multiscale(
-            img_shape, class_labels_by_batch, box_labels_by_batch, strides
-        )
-    else:
-        # Fall back to your original implementation
-        # You can import and use your original function here
-        raise NotImplementedError(f"Method {method} not implemented")
+                class_target_for_feature[
+                    batch_idx, min_y + 1 : max_y - 1, min_x + 1 : max_x - 1
+                ] = class_labels[j]
+
+                for x in range(min_x + 1, max_x - 1):
+                    for y in range(min_y + 1, max_y - 1):
+                        target = torch.Tensor(
+                            [
+                                x - float(box_labels[j][0]) / stride,
+                                y - float(box_labels[j][1]) / stride,
+                                float(box_labels[j][2]) / stride - x,
+                                float(box_labels[j][3]) / stride - y,
+                            ]
+                        )
+                        box_target_for_feature[batch_idx, y, x] = target
+
+        class_targets_by_feature.append(class_target_for_feature)
+        centerness_target_by_feature.append(centerness_target_for_feature)
+        box_targets_by_feature.append(box_target_for_feature)
+
+    # Return [BHWC, BHW[min_x, min_y, max_x, max_y]]
+    return class_targets_by_feature, centerness_target_by_feature, box_targets_by_feature
