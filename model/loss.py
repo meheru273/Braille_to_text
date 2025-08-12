@@ -103,6 +103,7 @@ def _compute_loss(
 ):
     """
     Compute original FCOS losses (classification, centerness, regression)
+    *** FIXED: Apply sigmoid to centerness predictions before BCE loss ***
     """
     device = classes[0].device
     num_classes = classes[0].shape[-1]
@@ -141,9 +142,11 @@ def _compute_loss(
             cls_loss = cls_loss / num_positives
         classification_losses.append(cls_loss)
         
-        # Centerness loss (only on positive samples)
+        # *** CRITICAL FIX: Apply sigmoid to centerness predictions ***
         if num_positives > 0:
-            cent_loss = centerness_loss_fn(cent_p_flat[pos_mask], cent_t_flat[pos_mask])
+            # Apply sigmoid to convert logits to probabilities [0,1]
+            cent_p_sigmoid = torch.sigmoid(cent_p_flat[pos_mask])
+            cent_loss = centerness_loss_fn(cent_p_sigmoid, cent_t_flat[pos_mask])
             cent_loss = cent_loss.mean()
             centerness_losses.append(cent_loss)
             
@@ -162,5 +165,3 @@ def _compute_loss(
     total_reg_loss = torch.stack(regression_losses).mean() * regression_weight
     
     return total_cls_loss, total_cent_loss, total_reg_loss
-
-
