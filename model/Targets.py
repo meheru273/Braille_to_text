@@ -34,8 +34,8 @@ def generate_targets(
     ]
 
     for i, stride in enumerate(strides):
-        feat_h = int(img_shape[2] / stride)
-        feat_w = int(img_shape[3] / stride)
+        feat_h = int((img_shape[2] + stride - 1) // stride)  # Ceiling division
+        feat_w = int((img_shape[3] + stride - 1) // stride)
 
         class_target_for_feature = torch.zeros(batch_size, feat_h, feat_w, dtype=int)
         centerness_target_for_feature = torch.zeros(batch_size, feat_h, feat_w)
