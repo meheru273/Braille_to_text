@@ -73,12 +73,84 @@ class FPNTransformerFusion(nn.Module):
         return enhanced_features
 
 
+class FeatureFusionModule(nn.Module):
+    """
+    Module to fuse multi-scale features into a single feature map
+    """
+    def __init__(self, in_channels=256, out_channels=256, target_size=None):
+        super().__init__()
+        self.in_channels = in_channels
+        self.out_channels = out_channels
+        self.target_size = target_size
+        
+        # Channel attention for weighting different scales
+        self.channel_attention = nn.Sequential(
+            nn.AdaptiveAvgPool2d(1),
+            nn.Conv2d(in_channels * 5, in_channels * 5 // 4, 1),  # 5 FPN levels
+            nn.ReLU(inplace=True),
+            nn.Conv2d(in_channels * 5 // 4, 5, 1),  # Output weights for 5 levels
+            nn.Sigmoid()
+        )
+        
+        # Final fusion layer
+        self.fusion_conv = nn.Sequential(
+            nn.Conv2d(in_channels * 5, out_channels, 3, padding=1),
+            nn.GroupNorm(32, out_channels),
+            nn.ReLU(inplace=True),
+            nn.Conv2d(out_channels, out_channels, 3, padding=1),
+            nn.GroupNorm(32, out_channels),
+            nn.ReLU(inplace=True)
+        )
+    
+    def forward(self, features):
+        """
+        features: List of [B, C, H_i, W_i] feature maps
+        Returns: Single fused feature map [B, C, H, W]
+        """
+        # Determine target size (use the largest feature map or specified size)
+        if self.target_size is None:
+            target_size = max([feat.shape[2:] for feat in features])
+        else:
+            target_size = self.target_size
+        
+        # Resize all features to target size
+        resized_features = []
+        for feat in features:
+            if feat.shape[2:] != target_size:
+                resized_feat = F.interpolate(
+                    feat, size=target_size, 
+                    mode='bilinear', align_corners=False
+                )
+            else:
+                resized_feat = feat
+            resized_features.append(resized_feat)
+        
+        # Concatenate all features
+        concat_features = torch.cat(resized_features, dim=1)  # [B, C*5, H, W]
+        
+        # Generate attention weights for each scale
+        attention_weights = self.channel_attention(concat_features)  # [B, 5, 1, 1]
+        
+        # Apply attention weights to each scale
+        weighted_features = []
+        for i, feat in enumerate(resized_features):
+            weight = attention_weights[:, i:i+1, :, :]  # [B, 1, 1, 1]
+            weighted_feat = feat * weight
+            weighted_features.append(weighted_feat)
+        
+        # Concatenate weighted features and fuse
+        weighted_concat = torch.cat(weighted_features, dim=1)
+        fused_feature = self.fusion_conv(weighted_concat)
+        
+        return fused_feature
+
+
 class FPN(nn.Module):
     """
-    Enhanced FPN with integrated attention mechanisms for Braille detection
-    Compatible with original FCOS inference and target generation
+    Enhanced FPN with single detection layer for Braille detection
+    Addresses zero positive samples issue by fusing all scales
     """
-    def __init__(self, num_classes=26, use_fpn_att: bool = True):
+    def __init__(self, num_classes=26, use_fpn_att: bool = True, fusion_target_size=(64, 64)):
         super().__init__()
         
         from BackBone import BackBone
@@ -86,11 +158,11 @@ class FPN(nn.Module):
         
         self.num_classes = num_classes
         self.use_fpn_att = use_fpn_att
+        self.fusion_target_size = fusion_target_size
 
-        # FCOS strides for compatibility
-        self.strides = [8, 16, 32, 64, 128]
-        self.scales = nn.Parameter(torch.tensor([8.,16.,32.,64.,128.]))
-
+        # Single stride for the fused detection layer
+        self.stride = 8  # You can adjust this based on your needs
+        self.scale = nn.Parameter(torch.tensor(8.0))  # Single scale parameter
         
         # Feature channels from backbone
         backbone_channels = [64, 128, 256, 512]
@@ -112,23 +184,30 @@ class FPN(nn.Module):
             )
         ])
         
-        # Feature fusion layers
+        # Feature fusion layers (optional - for FPN level enhancement)
         if self.use_fpn_att:
             # Use cross-attention fusion between FPN levels
             self.fpn_cross_attention_fusion = FPNTransformerFusion(fpn_channels, num_heads=8)
         else:
             # Use regular CNN fusion
             self.feature_fusion = nn.ModuleList()
-            for _ in range(len(self.strides)):
+            for _ in range(5):  # 5 FPN levels
                 self.feature_fusion.append(
                     nn.Sequential(
                         nn.Conv2d(fpn_channels, fpn_channels, 3, padding=1),
                         nn.GroupNorm(32, fpn_channels),
                         nn.ReLU(inplace=True)
                     )
-                )  
-           
-        # Detection heads
+                )
+        
+        # NEW: Multi-scale feature fusion module
+        self.feature_fusion_module = FeatureFusionModule(
+            in_channels=fpn_channels, 
+            out_channels=fpn_channels,
+            target_size=fusion_target_size
+        )
+        
+        # Single detection head (instead of multiple heads for different scales)
         self.classification_head = self._make_head(fpn_channels, 128)
         self.regression_head = self._make_head(fpn_channels, 128)
         self.centerness_head = self._make_head(fpn_channels, 128)
@@ -148,9 +227,10 @@ class FPN(nn.Module):
         """Print the configuration of attention mechanisms"""
         print(f"FPN Configuration:")
         print(f"  - FPN Cross-Attention: {self.use_fpn_att}")
-        print(f"  - Centerness Branch: Enabled (FCOS Compatible)")
+        print(f"  - Single Detection Layer: Enabled")
+        print(f"  - Fusion Target Size: {self.fusion_target_size}")
         print(f"  - Number of Classes: {self.num_classes}")
-        print(f"  - Strides: {self.strides}")
+        print(f"  - Single Stride: {self.stride}")
     
     def _make_head(self, in_channels: int, out_channels: int) -> nn.Module:
         """Create detection head layers"""
@@ -209,9 +289,10 @@ class FPN(nn.Module):
         nn.init.normal_(self.centerness_to_centerness.weight, std=0.01)
         nn.init.constant_(self.centerness_to_centerness.bias, 0)
     
-    def forward(self, x: torch.Tensor) -> Tuple[List[torch.Tensor], List[torch.Tensor], List[torch.Tensor], List[torch.Tensor]]:
+    def forward(self, x: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, List[torch.Tensor]]:
         """
-        Returns (classes, centerness, regression, attention_maps) for FCOS compatibility
+        Returns single detection outputs instead of multi-scale lists
+        Returns (classes, centerness, regression, attention_maps)
         """
         # Backbone forward
         backbone_features = self.backbone(x)
@@ -234,52 +315,43 @@ class FPN(nn.Module):
         
         # Extra levels
         p6 = self.extra_convs[0](p5)
-        p7 = F.max_pool2d(p6, kernel_size=3, stride=2, padding=1)
         
-        # FPN features - note we use P3-P7 to match FCOS levels
-        fpn_features = [p3, p4, p5, p6, p7]  # Match original FCOS levels
+        # FPN features
+        fpn_features = [p2, p3, p4, p5, p6]  # All 5 levels
         
-        # Feature fusion with cross-attention or regular CNN
+        # Optional: Feature enhancement at FPN level
         if self.use_fpn_att:
             # Use cross-attention fusion between FPN levels
-            fused_features = self.fpn_cross_attention_fusion(fpn_features)
+            enhanced_features = self.fpn_cross_attention_fusion(fpn_features)
         else:
             # Use regular CNN fusion
-            fused_features = []
+            enhanced_features = []
             for feat, fusion in zip(fpn_features, self.feature_fusion):
                 fused = fusion(feat)
-                fused_features.append(fused)
+                enhanced_features.append(fused)
+        
+        # NEW: Fuse all scales into single feature map
+        fused_feature = self.feature_fusion_module(enhanced_features)
         
         # For attention maps (can be empty list if not using attention)
         attention_maps = []
         
-        # Detection predictions
-        classes_by_feature = []
-        centerness_by_feature = []
-        regression_by_feature = []
+        # Single detection head predictions
+        cls_feat = self.classification_head(fused_feature)
+        cls_out = torch.sigmoid(self.classification_to_class(cls_feat))
         
-        for scale, feat in zip(self.scales, fused_features):
-            # Use CNN-based heads
-            cls_feat = self.classification_head(feat)
-            cls_out = torch.sigmoid(self.classification_to_class(cls_feat))
-            
-            cent_feat = self.centerness_head(feat)
-            # CHANGE: Output logits instead of sigmoid for BCEWithLogitsLoss compatibility
-            cent_out = self.centerness_to_centerness(cent_feat)  # Remove torch.sigmoid()
-            
-            reg_feat = self.regression_head(feat)
-            reg_out = torch.exp(self.regression_to_bbox(reg_feat)) * scale
-            
-            # Reshape to match FCOS format: B[C]HW -> BHW[C]
-            cls_out = cls_out.permute(0, 2, 3, 1).contiguous()
-            cent_out = cent_out.permute(0, 2, 3, 1).contiguous().squeeze(3)
-            reg_out = reg_out.permute(0, 2, 3, 1).contiguous()
-            
-            classes_by_feature.append(cls_out)
-            centerness_by_feature.append(cent_out)
-            regression_by_feature.append(reg_out)
+        cent_feat = self.centerness_head(fused_feature)
+        cent_out = self.centerness_to_centerness(cent_feat)  # Logits for BCEWithLogitsLoss
         
-        return classes_by_feature, centerness_by_feature, regression_by_feature, attention_maps
+        reg_feat = self.regression_head(fused_feature)
+        reg_out = torch.exp(self.regression_to_bbox(reg_feat)) * self.scale
+        
+        # Reshape to match expected format: B[C]HW -> BHW[C]
+        cls_out = cls_out.permute(0, 2, 3, 1).contiguous()
+        cent_out = cent_out.permute(0, 2, 3, 1).contiguous().squeeze(3)
+        reg_out = reg_out.permute(0, 2, 3, 1).contiguous()
+        
+        return cls_out, cent_out, reg_out, attention_maps
 
 
 # Helper function to normalize batch

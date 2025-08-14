@@ -7,7 +7,7 @@ import numpy as np
 import torch
 import torchvision
 
-from fcos.models import FCOS, normalize_batch
+from AttentionFPN import FPN, normalize_batch
 
 MIN_SCORE = 0.05
 DEFAULT_MAX_DETECTIONS = 3000
@@ -30,15 +30,14 @@ def render_detections_to_image(img: np.ndarray, detections: List[Detection]):
     return img
 
 
-def compute_detections(model: FCOS, img: np.ndarray, device) -> List[Detection]:
+def compute_detections(model: FPN, img: np.ndarray, device) -> List[Detection]:
     """
     Take an image using opencv conventions and return a list of detections.
     """
     tensor = img
     return compute_detections_for_tensor(model, tensor, device)
 
-
-def compute_detections_for_tensor(model: FCOS, x, device) -> List[Detection]:
+def compute_detections_for_tensor(model: FPN, x, device) -> List[Detection]:
     with torch.no_grad():
         x = x.to(device)
 
