@@ -95,88 +95,78 @@ class FocalLoss(nn.Module):
         self.alpha = class_weights
         print(f"Auto-calculated alpha weights: {self.alpha}")
 
-
-
 def _compute_loss(
-    classes, centerness, boxes, class_targets, centerness_targets, box_targets,
-    focal_loss_fn, classification_weight=1.0, centerness_weight=1.0, regression_weight=1.0
+    cls_pred_list, centerness_pred_list, box_pred_list,
+    class_targets, centerness_targets, box_targets,
+    focal_loss,
+    classification_weight=1.0,
+    centerness_weight=1.0,
+    regression_weight=1.0
 ):
     """
-    Compute original FCOS losses (classification, centerness, regression)
-    *** FIXED: Apply sigmoid to centerness predictions + shape validation ***
+    Updated loss computation for single detection layer
+    
+    Args:
+        cls_pred_list: List with single element [B, H, W, num_classes]
+        centerness_pred_list: List with single element [B, H, W] 
+        box_pred_list: List with single element [B, H, W, 4]
+        class_targets: List with single element [B, H, W]
+        centerness_targets: List with single element [B, H, W]
+        box_targets: List with single element [B, H, W, 4]
     """
-    device = classes[0].device
-    num_classes = classes[0].shape[-1]
+    device = cls_pred_list[0].device
     
-    classification_losses = []
-    centerness_losses = []
-    regression_losses = []
+    total_cls_loss = torch.tensor(0.0, device=device)
+    total_cent_loss = torch.tensor(0.0, device=device)
+    total_reg_loss = torch.tensor(0.0, device=device)
     
-    box_loss_fn = nn.SmoothL1Loss(reduction='none')
-    centerness_loss_fn = nn.BCELoss(reduction='none')
+    # Only one detection level now
+    cls_pred = cls_pred_list[0]
+    cent_pred = centerness_pred_list[0]
+    reg_pred = box_pred_list[0]
     
-    for idx in range(len(classes)):
-        cls_p = classes[idx]      # [B, H, W, num_classes]
-        cent_p = centerness[idx]  # [B, H, W]
-        box_p = boxes[idx]        # [B, H, W, 4]
-        
-        cls_t = class_targets[idx].to(device)      # [B, H, W]
-        cent_t = centerness_targets[idx].to(device) # [B, H, W]
-        box_t = box_targets[idx].to(device)        # [B, H, W, 4]
-        
-        # *** SHAPE VALIDATION AND FIXING ***
-        # Ensure predictions and targets have same spatial dimensions
-        B, H_p, W_p, C = cls_p.shape
-        B_t, H_t, W_t = cls_t.shape
-        
-        if H_p != H_t or W_p != W_t:
-            print(f"Level {idx}: Shape mismatch - Pred: {cls_p.shape}, Target: {cls_t.shape}")
-            # Resize targets to match predictions
-            cls_t = F.interpolate(cls_t.unsqueeze(1).float(), size=(H_p, W_p), mode='nearest').squeeze(1).long()
-            cent_t = F.interpolate(cent_t.unsqueeze(1), size=(H_p, W_p), mode='nearest').squeeze(1)
-            box_t = F.interpolate(box_t.permute(0, 3, 1, 2), size=(H_p, W_p), mode='nearest').permute(0, 2, 3, 1)
-        
-        # Flatten for loss computation
-        cls_p_flat = cls_p.view(-1, num_classes)
-        cls_t_flat = cls_t.view(-1).long()
-        cent_p_flat = cent_p.view(-1)
-        cent_t_flat = cent_t.view(-1)
-        box_p_flat = box_p.view(-1, 4)
-        box_t_flat = box_t.view(-1, 4)
-        
-        # Additional safety check
-        assert cls_p_flat.shape[0] == cls_t_flat.shape[0], f"Level {idx}: Flattened size mismatch {cls_p_flat.shape[0]} vs {cls_t_flat.shape[0]}"
-        
-        # Positive samples mask
-        pos_mask = cls_t_flat > 0
-        num_positives = pos_mask.sum().item()
-        
-        # Classification loss (Focal Loss)
-        cls_loss = focal_loss_fn(cls_p_flat, cls_t_flat)
-        if num_positives > 0:
-            cls_loss = cls_loss / num_positives
-        classification_losses.append(cls_loss)
-        
-        # *** CRITICAL FIX: Apply sigmoid to centerness predictions before BCE loss ***
-        if num_positives > 0:
-            # Apply sigmoid to convert logits to probabilities [0,1]
-            cent_p_sigmoid = torch.sigmoid(cent_p_flat[pos_mask])
-            cent_loss = centerness_loss_fn(cent_p_sigmoid, cent_t_flat[pos_mask])
-            cent_loss = cent_loss.mean()
-            centerness_losses.append(cent_loss)
-            
-            # Regression loss (only on positive samples, weighted by centerness)
-            reg_loss = box_loss_fn(box_p_flat[pos_mask], box_t_flat[pos_mask])
-            reg_loss = reg_loss.sum(dim=1)  # Sum over 4 coordinates
-            reg_loss = (reg_loss * cent_t_flat[pos_mask]).mean()  # Weight by centerness targets
-            regression_losses.append(reg_loss)
-        else:
-            centerness_losses.append(torch.tensor(0.0, device=device, requires_grad=True))
-            regression_losses.append(torch.tensor(0.0, device=device, requires_grad=True))
+    cls_target = class_targets[0].to(device).long()
+    cent_target = centerness_targets[0].to(device).float()
+    reg_target = box_targets[0].to(device).float()
     
-    # Compute final losses
-    total_cls_loss = torch.stack(classification_losses).mean() * classification_weight
-    total_cent_loss = torch.stack(centerness_losses).mean() * centerness_weight
-    total_reg_loss = torch.stack(regression_losses).mean() * regression_weight
+    # Ensure shapes match
+    if cls_pred.shape[:3] != cls_target.shape:
+        raise ValueError(f"Classification shape mismatch: pred {cls_pred.shape[:3]} vs target {cls_target.shape}")
+    
+    if cent_pred.shape != cent_target.shape:
+        raise ValueError(f"Centerness shape mismatch: pred {cent_pred.shape} vs target {cent_target.shape}")
+    
+    # Classification loss
+    cls_pred_flat = cls_pred.view(-1, cls_pred.shape[-1])  # [B*H*W, num_classes]
+    cls_target_flat = cls_target.view(-1)                  # [B*H*W]
+    
+    cls_loss = focal_loss(cls_pred_flat, cls_target_flat)
+    total_cls_loss = cls_loss * classification_weight
+    
+    # Centerness and regression losses (only on positive samples)
+    positive_mask = (cls_target > 0).float()
+    num_positives = positive_mask.sum().item()
+    
+    if num_positives > 0:
+        # Centerness loss
+        cent_loss = torch.nn.functional.binary_cross_entropy_with_logits(
+            cent_pred[positive_mask > 0],
+            cent_target[positive_mask > 0],
+            reduction='mean'
+        )
+        total_cent_loss = cent_loss * centerness_weight
+        
+        # Regression loss  
+        reg_pred_pos = reg_pred.view(-1, 4)[positive_mask.view(-1) > 0]
+        reg_target_pos = reg_target.view(-1, 4)[positive_mask.view(-1) > 0]
+        
+        reg_loss = torch.nn.functional.smooth_l1_loss(
+            reg_pred_pos, reg_target_pos, reduction='mean'
+        )
+        total_reg_loss = reg_loss * regression_weight
+    else:
+        # No positive samples - only classification loss
+        total_cent_loss = torch.tensor(0.0, device=device)
+        total_reg_loss = torch.tensor(0.0, device=device)
     
     return total_cls_loss, total_cent_loss, total_reg_loss
