@@ -164,6 +164,10 @@ class FPN(nn.Module):
         self.stride = 8  # You can adjust this based on your needs
         self.scale = nn.Parameter(torch.tensor(8.0))  # Single scale parameter
         
+        # Keep strides for backward compatibility (only one element now)
+        self.strides = [8]  # Single stride in a list for compatibility
+        self.scales = nn.Parameter(torch.tensor([8.0]))  # Single scale in a list
+        
         # Feature channels from backbone
         backbone_channels = [64, 128, 256, 512]
         fpn_channels = 256
@@ -230,7 +234,7 @@ class FPN(nn.Module):
         print(f"  - Single Detection Layer: Enabled")
         print(f"  - Fusion Target Size: {self.fusion_target_size}")
         print(f"  - Number of Classes: {self.num_classes}")
-        print(f"  - Single Stride: {self.stride}")
+        print(f"  - Single Stride: {self.strides}")  # Show as list for compatibility
     
     def _make_head(self, in_channels: int, out_channels: int) -> nn.Module:
         """Create detection head layers"""
@@ -344,7 +348,7 @@ class FPN(nn.Module):
         cent_out = self.centerness_to_centerness(cent_feat)  # Logits for BCEWithLogitsLoss
         
         reg_feat = self.regression_head(fused_feature)
-        reg_out = torch.exp(self.regression_to_bbox(reg_feat)) * self.scale
+        reg_out = torch.exp(self.regression_to_bbox(reg_feat)) * self.scales[0]
         
         # Reshape to match expected format: B[C]HW -> BHW[C]
         cls_out = cls_out.permute(0, 2, 3, 1).contiguous()
