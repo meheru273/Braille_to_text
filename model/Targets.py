@@ -3,6 +3,7 @@ import torch
 import math
 
 
+# Use this as your new Targets.py file content
 def generate_targets(
     img_shape: torch.LongTensor,
     class_labels_by_batch: List[torch.LongTensor],
@@ -105,3 +106,4 @@ def generate_targets(
 
     # Return single-element lists to maintain interface compatibility
     return class_targets_by_feature, centerness_target_by_feature, box_targets_by_feature
+
