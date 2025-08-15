@@ -76,12 +76,13 @@ class FPNTransformerFusion(nn.Module):
 class FeatureFusionModule(nn.Module):
     """
     Module to fuse multi-scale features into a single feature map
+    Now properly calculates target size based on image dimensions and stride
     """
-    def __init__(self, in_channels=256, out_channels=256, target_size=None):
+    def __init__(self, in_channels=256, out_channels=256, stride=8):
         super().__init__()
         self.in_channels = in_channels
         self.out_channels = out_channels
-        self.target_size = target_size
+        self.stride = stride
         
         # Channel attention for weighting different scales
         self.channel_attention = nn.Sequential(
@@ -102,16 +103,24 @@ class FeatureFusionModule(nn.Module):
             nn.ReLU(inplace=True)
         )
     
-    def forward(self, features):
+    def calculate_target_size(self, input_shape):
+        """
+        Calculate the target feature map size based on input image and stride
+        input_shape: [B, C, H, W]
+        """
+        img_height, img_width = input_shape[2], input_shape[3]
+        target_h = int((img_height + self.stride - 1) // self.stride)  # Ceiling division
+        target_w = int((img_width + self.stride - 1) // self.stride)
+        return (target_h, target_w)
+    
+    def forward(self, features, input_shape):
         """
         features: List of [B, C, H_i, W_i] feature maps
+        input_shape: Original input image shape [B, C, H, W]
         Returns: Single fused feature map [B, C, H, W]
         """
-        # Determine target size (use the largest feature map or specified size)
-        if self.target_size is None:
-            target_size = max([feat.shape[2:] for feat in features])
-        else:
-            target_size = self.target_size
+        # Calculate target size based on input image and stride
+        target_size = self.calculate_target_size(input_shape)
         
         # Resize all features to target size
         resized_features = []
@@ -148,9 +157,9 @@ class FeatureFusionModule(nn.Module):
 class FPN(nn.Module):
     """
     Enhanced FPN with single detection layer for Braille detection
-    Addresses zero positive samples issue by fusing all scales
+    Fixed to properly calculate feature map dimensions based on input size
     """
-    def __init__(self, num_classes=26, use_fpn_att: bool = True, fusion_target_size=(64, 64)):
+    def __init__(self, num_classes=26, use_fpn_att: bool = True):
         super().__init__()
         
         from BackBone import BackBone
@@ -158,15 +167,14 @@ class FPN(nn.Module):
         
         self.num_classes = num_classes
         self.use_fpn_att = use_fpn_att
-        self.fusion_target_size = fusion_target_size
 
         # Single stride for the fused detection layer
-        self.stride = 8  # You can adjust this based on your needs
-        self.scale = nn.Parameter(torch.tensor(8.0))  # Single scale parameter
+        self.stride = 8
+        self.scale = nn.Parameter(torch.tensor(8.0))
         
         # Keep strides for backward compatibility (only one element now)
-        self.strides = [8]  # Single stride in a list for compatibility
-        self.scales = nn.Parameter(torch.tensor([8.0]))  # Single scale in a list
+        self.strides = [8]
+        self.scales = nn.Parameter(torch.tensor([8.0]))
         
         # Feature channels from backbone
         backbone_channels = [64, 128, 256, 512]
@@ -204,11 +212,11 @@ class FPN(nn.Module):
                     )
                 )
         
-        # NEW: Multi-scale feature fusion module
+        # NEW: Multi-scale feature fusion module (no fixed target size)
         self.feature_fusion_module = FeatureFusionModule(
             in_channels=fpn_channels, 
             out_channels=fpn_channels,
-            target_size=fusion_target_size
+            stride=self.stride  # Pass stride instead of fixed size
         )
         
         # Single detection head (instead of multiple heads for different scales)
@@ -232,9 +240,9 @@ class FPN(nn.Module):
         print(f"FPN Configuration:")
         print(f"  - FPN Cross-Attention: {self.use_fpn_att}")
         print(f"  - Single Detection Layer: Enabled")
-        print(f"  - Fusion Target Size: {self.fusion_target_size}")
+        print(f"  - Dynamic Target Size: Based on input dimensions")
         print(f"  - Number of Classes: {self.num_classes}")
-        print(f"  - Single Stride: {self.strides}")  # Show as list for compatibility
+        print(f"  - Single Stride: {self.strides}")
     
     def _make_head(self, in_channels: int, out_channels: int) -> nn.Module:
         """Create detection head layers"""
@@ -298,6 +306,9 @@ class FPN(nn.Module):
         Returns single detection outputs instead of multi-scale lists
         Returns (classes, centerness, regression, attention_maps)
         """
+        # Store original input shape for target size calculation
+        original_shape = x.shape
+        
         # Backbone forward
         backbone_features = self.backbone(x)
         c2, c3, c4, c5 = backbone_features
@@ -334,8 +345,11 @@ class FPN(nn.Module):
                 fused = fusion(feat)
                 enhanced_features.append(fused)
         
-        # NEW: Fuse all scales into single feature map
-        fused_feature = self.feature_fusion_module(enhanced_features)
+        # NEW: Fuse all scales into single feature map with correct target size
+        fused_feature = self.feature_fusion_module(enhanced_features, original_shape)
+        
+        # Debug: Print fused feature shape
+        print(f"DEBUG: Fused feature shape: {fused_feature.shape}")
         
         # For attention maps (can be empty list if not using attention)
         attention_maps = []
@@ -354,6 +368,8 @@ class FPN(nn.Module):
         cls_out = cls_out.permute(0, 2, 3, 1).contiguous()
         cent_out = cent_out.permute(0, 2, 3, 1).contiguous().squeeze(3)
         reg_out = reg_out.permute(0, 2, 3, 1).contiguous()
+        
+        print(f"DEBUG: Final output shapes - cls: {cls_out.shape}, cent: {cent_out.shape}, reg: {reg_out.shape}")
         
         return cls_out, cent_out, reg_out, attention_maps
 
